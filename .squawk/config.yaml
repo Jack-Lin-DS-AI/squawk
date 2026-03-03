@@ -1,6 +1,0 @@
-server:
-    host: localhost
-    port: 3131
-rules_dir: ./rules
-log_file: .squawk/squawk.log
-log_level: info

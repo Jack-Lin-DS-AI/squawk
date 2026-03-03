@@ -72,3 +72,58 @@ rules:
       message: |
         You are creating many new files without reading existing code.
         Please explore the codebase first to avoid duplicating existing functionality.
+
+  - name: same-file-excessive-edits
+    description: "Detect excessive file edits suggesting the agent is struggling"
+    enabled: true
+    priority: 6
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit|Write"
+          count: 8
+          within: "5m"
+    action:
+      type: inject
+      message: |
+        You have made {count} file edits in the last 5 minutes. This suggests you may be struggling.
+        Consider reading related files for context, running tests for feedback, or stepping back to reconsider your approach.
+
+  - name: write-before-read
+    description: "Detect writing code without exploring the codebase first"
+    enabled: true
+    priority: 4
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit|Write"
+          count: 3
+          within: "2m"
+        - event: PostToolUse
+          tool: "Read|Glob|Grep"
+          negate: true
+          count: 1
+          within: "2m"
+    action:
+      type: inject
+      message: |
+        You started modifying code without exploring the codebase first.
+        Read existing files to understand patterns and conventions before writing.
+
+  - name: session-context-warning
+    description: "Warn about potential context degradation in long sessions"
+    enabled: true
+    priority: 2
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          count: 50
+          within: "30m"
+    action:
+      type: inject
+      message: |
+        This session has had {count} tool interactions. Context degradation may cause instruction drift.
+        Consider running /compact with a task summary, or /clear if switching tasks.

@@ -2,8 +2,9 @@
 /squawk
 *.exe
 
-# Squawk runtime
+# Squawk runtime (user-specific)
 .squawk/squawk.log
+.squawk/config.yaml
 
 # IDE
 .idea/

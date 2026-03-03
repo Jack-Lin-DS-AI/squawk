@@ -169,10 +169,17 @@ func (s *Server) handlePostToolUse(w http.ResponseWriter, r *http.Request) {
 	activities := s.tracker.GetActivities(event.SessionID)
 	matches := s.evaluator.Evaluate(activities, event)
 
+	var injectResp *types.HookResponse
 	for _, m := range matches {
 		if s.executor != nil {
-			if _, err := s.executor.Execute(m); err != nil {
+			resp, err := s.executor.Execute(m)
+			if err != nil {
 				log.Printf("executor error for rule %q: %v", m.Rule.Name, err)
+				continue
+			}
+			// Capture the first inject response (non-nil with AdditionalContext).
+			if injectResp == nil && resp != nil && resp.AdditionalContext != "" {
+				injectResp = resp
 			}
 		} else {
 			log.Printf("rule matched: %s (action=%s, session=%s)",
@@ -180,6 +187,10 @@ func (s *Server) handlePostToolUse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if injectResp != nil {
+		writeJSON(w, http.StatusOK, *injectResp)
+		return
+	}
 	writeJSON(w, http.StatusOK, types.HookResponse{})
 }
 

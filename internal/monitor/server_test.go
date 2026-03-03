@@ -33,6 +33,15 @@ func (m *mockExecutor) Execute(match types.RuleMatch) (*types.HookResponse, erro
 	return m.resp, m.err
 }
 
+// mockExecutorFunc is a test double that delegates to a function for per-call control.
+type mockExecutorFunc struct {
+	fn func(types.RuleMatch) (*types.HookResponse, error)
+}
+
+func (m *mockExecutorFunc) Execute(match types.RuleMatch) (*types.HookResponse, error) {
+	return m.fn(match)
+}
+
 func newTestServer(evaluator RuleEvaluator) (*Server, *Tracker) {
 	tracker := NewTracker(10 * time.Minute)
 	srv := NewServer(":0", tracker, evaluator, nil)
@@ -408,6 +417,156 @@ func TestServer(t *testing.T) {
 		}
 		if len(exec.calls) != 1 {
 			t.Fatalf("executor call count = %d, want 1", len(exec.calls))
+		}
+	})
+
+	t.Run("post-tool-use inject match returns additionalContext", func(t *testing.T) {
+		evaluator := &mockEvaluator{
+			matches: []types.RuleMatch{
+				{
+					Rule: types.Rule{
+						Name:    "inject-guidance",
+						Enabled: true,
+						Action: types.Action{
+							Type:    types.ActionInject,
+							Message: "you should read files first",
+						},
+					},
+					MatchedAt: time.Now(),
+				},
+			},
+		}
+
+		exec := &mockExecutor{
+			resp: &types.HookResponse{
+				AdditionalContext: "you should read files first",
+			},
+		}
+		srv, _ := newTestServerWithExecutor(evaluator, exec)
+		ts := httptest.NewServer(srv)
+		defer ts.Close()
+
+		event := types.Event{
+			SessionID:     "sess-inject-1",
+			HookEventName: "PostToolUse",
+			ToolName:      "Edit",
+			Timestamp:     time.Now(),
+		}
+
+		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		body := decodeJSON[types.HookResponse](t, resp)
+
+		if body.Decision != "" {
+			t.Errorf("decision = %q, want empty", body.Decision)
+		}
+		if body.AdditionalContext != "you should read files first" {
+			t.Errorf("additionalContext = %q, want %q", body.AdditionalContext, "you should read files first")
+		}
+		if len(exec.calls) != 1 {
+			t.Fatalf("executor call count = %d, want 1", len(exec.calls))
+		}
+	})
+
+	t.Run("post-tool-use multiple matches returns first inject response", func(t *testing.T) {
+		evaluator := &mockEvaluator{
+			matches: []types.RuleMatch{
+				{
+					Rule: types.Rule{
+						Name:    "log-only",
+						Enabled: true,
+						Action: types.Action{
+							Type:    types.ActionLog,
+							Message: "just logging",
+						},
+					},
+					MatchedAt: time.Now(),
+				},
+				{
+					Rule: types.Rule{
+						Name:    "inject-first",
+						Enabled: true,
+						Action: types.Action{
+							Type:    types.ActionInject,
+							Message: "first inject",
+						},
+					},
+					MatchedAt: time.Now(),
+				},
+			},
+		}
+
+		callCount := 0
+		// Use a custom executor that returns different responses per call.
+		customExec := &mockExecutorFunc{
+			fn: func(match types.RuleMatch) (*types.HookResponse, error) {
+				callCount++
+				if match.Rule.Action.Type == types.ActionInject {
+					return &types.HookResponse{
+						AdditionalContext: "injected context",
+					}, nil
+				}
+				return nil, nil // log action returns nil
+			},
+		}
+		srv, _ := newTestServerWithExecutor(evaluator, customExec)
+		ts := httptest.NewServer(srv)
+		defer ts.Close()
+
+		event := types.Event{
+			SessionID:     "sess-inject-2",
+			HookEventName: "PostToolUse",
+			ToolName:      "Edit",
+			Timestamp:     time.Now(),
+		}
+
+		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		body := decodeJSON[types.HookResponse](t, resp)
+
+		if body.AdditionalContext != "injected context" {
+			t.Errorf("additionalContext = %q, want %q", body.AdditionalContext, "injected context")
+		}
+		if callCount != 2 {
+			t.Errorf("executor was called %d times, want 2 (should execute all matches)", callCount)
+		}
+	})
+
+	t.Run("post-tool-use no inject returns empty response", func(t *testing.T) {
+		evaluator := &mockEvaluator{
+			matches: []types.RuleMatch{
+				{
+					Rule: types.Rule{
+						Name:    "log-match",
+						Enabled: true,
+						Action: types.Action{
+							Type:    types.ActionLog,
+							Message: "logged",
+						},
+					},
+					MatchedAt: time.Now(),
+				},
+			},
+		}
+
+		exec := &mockExecutor{resp: nil} // log returns nil
+		srv, _ := newTestServerWithExecutor(evaluator, exec)
+		ts := httptest.NewServer(srv)
+		defer ts.Close()
+
+		event := types.Event{
+			SessionID:     "sess-inject-3",
+			HookEventName: "PostToolUse",
+			ToolName:      "Edit",
+			Timestamp:     time.Now(),
+		}
+
+		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		body := decodeJSON[types.HookResponse](t, resp)
+
+		if body.Decision != "" {
+			t.Errorf("decision = %q, want empty", body.Decision)
+		}
+		if body.AdditionalContext != "" {
+			t.Errorf("additionalContext = %q, want empty", body.AdditionalContext)
 		}
 	})
 

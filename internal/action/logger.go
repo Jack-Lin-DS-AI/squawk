@@ -58,6 +58,9 @@ func (l *ActionLogger) LogAction(match types.RuleMatch, response *types.HookResp
 	if response != nil && response.Reason != "" {
 		msg = response.Reason
 	}
+	if response != nil && response.AdditionalContext != "" {
+		msg = response.AdditionalContext
+	}
 	l.write(LogEntry{
 		Timestamp: match.MatchedAt,
 		RuleName:  match.Rule.Name,

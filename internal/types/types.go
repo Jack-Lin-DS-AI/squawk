@@ -68,8 +68,9 @@ type Activity struct {
 
 // HookResponse is the JSON response sent back to Claude Code hooks.
 type HookResponse struct {
-	Decision string `json:"decision,omitempty"` // "block" or empty (allow)
-	Reason   string `json:"reason,omitempty"`
+	Decision          string `json:"decision,omitempty"`          // "block" or empty (allow)
+	Reason            string `json:"reason,omitempty"`
+	AdditionalContext string `json:"additionalContext,omitempty"` // Injected context for PostToolUse hooks
 }
 
 // RuleMatch represents a triggered rule with context.

@@ -1,8 +1,10 @@
 package action
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -40,13 +42,14 @@ func makeMatch(actionType types.ActionType, message string, activityCount int) t
 
 func TestExecute(t *testing.T) {
 	tests := []struct {
-		name         string
-		actionType   types.ActionType
-		message      string
-		activityCnt  int
-		wantDecision string
-		wantReason   string
-		wantNil      bool
+		name                  string
+		actionType            types.ActionType
+		message               string
+		activityCnt           int
+		wantDecision          string
+		wantReason            string
+		wantAdditionalContext string
+		wantNil               bool
 	}{
 		{
 			name:         "block action returns block decision",
@@ -57,12 +60,12 @@ func TestExecute(t *testing.T) {
 			wantReason:   "blocked: too many edits",
 		},
 		{
-			name:         "inject action returns reason without decision",
-			actionType:   types.ActionInject,
-			message:      "please run tests before continuing",
-			activityCnt:  2,
-			wantDecision: "",
-			wantReason:   "please run tests before continuing",
+			name:                  "inject action returns additionalContext without decision",
+			actionType:            types.ActionInject,
+			message:               "please run tests before continuing",
+			activityCnt:           2,
+			wantDecision:          "",
+			wantAdditionalContext: "please run tests before continuing",
 		},
 		{
 			name:        "notify action returns nil response",
@@ -87,12 +90,12 @@ func TestExecute(t *testing.T) {
 			wantReason:   "detected 7 edits without tests",
 		},
 		{
-			name:         "template replaces count in inject message",
-			actionType:   types.ActionInject,
-			message:      "{count} file writes detected",
-			activityCnt:  12,
-			wantDecision: "",
-			wantReason:   "12 file writes detected",
+			name:                  "template replaces count in inject message",
+			actionType:            types.ActionInject,
+			message:               "{count} file writes detected",
+			activityCnt:           12,
+			wantDecision:          "",
+			wantAdditionalContext: "12 file writes detected",
 		},
 		{
 			name:         "zero activities replaces count with 0",
@@ -130,6 +133,9 @@ func TestExecute(t *testing.T) {
 			if resp.Reason != tt.wantReason {
 				t.Errorf("reason = %q, want %q", resp.Reason, tt.wantReason)
 			}
+			if resp.AdditionalContext != tt.wantAdditionalContext {
+				t.Errorf("additionalContext = %q, want %q", resp.AdditionalContext, tt.wantAdditionalContext)
+			}
 		})
 	}
 }
@@ -142,4 +148,264 @@ func TestExecuteUnsupportedAction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unsupported action type, got nil")
 	}
+}
+
+func TestExpandTemplateFileAndCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    string
+		toolInput  map[string]any
+		wantResult string
+	}{
+		{
+			name:       "replaces file from tool_input",
+			message:    "editing {file}",
+			toolInput:  map[string]any{"file_path": "/src/main.go"},
+			wantResult: "editing /src/main.go",
+		},
+		{
+			name:       "replaces command from tool_input",
+			message:    "ran: {command}",
+			toolInput:  map[string]any{"command": "go test ./..."},
+			wantResult: "ran: go test ./...",
+		},
+		{
+			name:       "replaces all three variables",
+			message:    "{count} edits to {file} after running {command}",
+			toolInput:  map[string]any{"file_path": "/a/b.go", "command": "make build"},
+			wantResult: "2 edits to /a/b.go after running make build",
+		},
+		{
+			name:       "missing file_path replaces with empty",
+			message:    "file={file} cmd={command}",
+			toolInput:  map[string]any{"command": "ls"},
+			wantResult: "file= cmd=ls",
+		},
+		{
+			name:       "missing command replaces with empty",
+			message:    "file={file} cmd={command}",
+			toolInput:  map[string]any{"file_path": "/a.go"},
+			wantResult: "file=/a.go cmd=",
+		},
+		{
+			name:       "no activities replaces all with empty or zero",
+			message:    "{count} {file} {command}",
+			toolInput:  nil,
+			wantResult: "0  ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var activities []types.Activity
+			if tt.toolInput != nil {
+				activities = []types.Activity{
+					{
+						Event: types.Event{
+							ToolInput: tt.toolInput,
+						},
+						Timestamp: time.Now(),
+						SessionID: "test-session",
+					},
+					{
+						Event:     types.Event{},
+						Timestamp: time.Now(),
+						SessionID: "test-session",
+					},
+				}
+			}
+			match := types.RuleMatch{
+				Rule: types.Rule{
+					Name:    "template-test",
+					Enabled: true,
+					Action: types.Action{
+						Type:    types.ActionBlock,
+						Message: tt.message,
+					},
+				},
+				Activities: activities,
+				MatchedAt:  time.Now(),
+			}
+			got := expandTemplate(tt.message, match)
+			if got != tt.wantResult {
+				t.Errorf("expandTemplate() = %q, want %q", got, tt.wantResult)
+			}
+		})
+	}
+}
+
+func TestActionLogger(t *testing.T) {
+	t.Run("LogMatch writes entry to file", func(t *testing.T) {
+		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
+		logger, err := NewActionLogger(logFile)
+		if err != nil {
+			t.Fatalf("failed to create action logger: %v", err)
+		}
+		defer logger.Close()
+
+		match := types.RuleMatch{
+			Rule: types.Rule{
+				Name:    "test-rule",
+				Enabled: true,
+				Action:  types.Action{Type: types.ActionBlock, Message: "blocked"},
+			},
+			Activities: []types.Activity{
+				{Timestamp: time.Now(), SessionID: "s1"},
+				{Timestamp: time.Now(), SessionID: "s1"},
+			},
+			MatchedAt: time.Now(),
+		}
+
+		logger.LogMatch(match)
+
+		entries, err := logger.GetRecentLogs(10)
+		if err != nil {
+			t.Fatalf("failed to get recent logs: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entries))
+		}
+		if entries[0].RuleName != "test-rule" {
+			t.Errorf("rule_name = %q, want %q", entries[0].RuleName, "test-rule")
+		}
+		if entries[0].Action != "block" {
+			t.Errorf("action = %q, want %q", entries[0].Action, "block")
+		}
+		if entries[0].Message != "rule matched with 2 activities" {
+			t.Errorf("message = %q, want %q", entries[0].Message, "rule matched with 2 activities")
+		}
+	})
+
+	t.Run("LogAction writes response message", func(t *testing.T) {
+		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
+		logger, err := NewActionLogger(logFile)
+		if err != nil {
+			t.Fatalf("failed to create action logger: %v", err)
+		}
+		defer logger.Close()
+
+		match := types.RuleMatch{
+			Rule: types.Rule{
+				Name:    "inject-rule",
+				Enabled: true,
+				Action:  types.Action{Type: types.ActionInject, Message: "original message"},
+			},
+			Activities: []types.Activity{{Timestamp: time.Now(), SessionID: "s1"}},
+			MatchedAt:  time.Now(),
+		}
+
+		resp := &types.HookResponse{
+			AdditionalContext: "expanded inject message",
+		}
+		logger.LogAction(match, resp)
+
+		entries, err := logger.GetRecentLogs(10)
+		if err != nil {
+			t.Fatalf("failed to get recent logs: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entries))
+		}
+		if entries[0].Message != "expanded inject message" {
+			t.Errorf("message = %q, want %q", entries[0].Message, "expanded inject message")
+		}
+	})
+
+	t.Run("LogAction uses Reason when AdditionalContext is empty", func(t *testing.T) {
+		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
+		logger, err := NewActionLogger(logFile)
+		if err != nil {
+			t.Fatalf("failed to create action logger: %v", err)
+		}
+		defer logger.Close()
+
+		match := types.RuleMatch{
+			Rule: types.Rule{
+				Name:    "block-rule",
+				Enabled: true,
+				Action:  types.Action{Type: types.ActionBlock, Message: "original"},
+			},
+			Activities: []types.Activity{{Timestamp: time.Now(), SessionID: "s1"}},
+			MatchedAt:  time.Now(),
+		}
+
+		resp := &types.HookResponse{
+			Decision: "block",
+			Reason:   "expanded block reason",
+		}
+		logger.LogAction(match, resp)
+
+		entries, err := logger.GetRecentLogs(10)
+		if err != nil {
+			t.Fatalf("failed to get recent logs: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entries))
+		}
+		if entries[0].Message != "expanded block reason" {
+			t.Errorf("message = %q, want %q", entries[0].Message, "expanded block reason")
+		}
+	})
+
+	t.Run("LogAction with nil response uses action message", func(t *testing.T) {
+		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
+		logger, err := NewActionLogger(logFile)
+		if err != nil {
+			t.Fatalf("failed to create action logger: %v", err)
+		}
+		defer logger.Close()
+
+		match := types.RuleMatch{
+			Rule: types.Rule{
+				Name:    "log-rule",
+				Enabled: true,
+				Action:  types.Action{Type: types.ActionLog, Message: "the original message"},
+			},
+			MatchedAt: time.Now(),
+		}
+
+		logger.LogAction(match, nil)
+
+		entries, err := logger.GetRecentLogs(10)
+		if err != nil {
+			t.Fatalf("failed to get recent logs: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entries))
+		}
+		if entries[0].Message != "the original message" {
+			t.Errorf("message = %q, want %q", entries[0].Message, "the original message")
+		}
+	})
+
+	t.Run("GetRecentLogs limits results", func(t *testing.T) {
+		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
+		logger, err := NewActionLogger(logFile)
+		if err != nil {
+			t.Fatalf("failed to create action logger: %v", err)
+		}
+		defer logger.Close()
+
+		for i := 0; i < 5; i++ {
+			logger.LogMatch(types.RuleMatch{
+				Rule: types.Rule{
+					Name:   fmt.Sprintf("rule-%d", i),
+					Action: types.Action{Type: types.ActionLog, Message: "msg"},
+				},
+				MatchedAt: time.Now(),
+			})
+		}
+
+		entries, err := logger.GetRecentLogs(3)
+		if err != nil {
+			t.Fatalf("failed to get recent logs: %v", err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("expected 3 entries, got %d", len(entries))
+		}
+		// Should return the last 3 entries.
+		if entries[0].RuleName != "rule-2" {
+			t.Errorf("first entry = %q, want %q", entries[0].RuleName, "rule-2")
+		}
+	})
 }

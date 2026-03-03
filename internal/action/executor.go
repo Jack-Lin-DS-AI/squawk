@@ -41,7 +41,7 @@ func (e *Executor) Execute(match types.RuleMatch) (*types.HookResponse, error) {
 	case types.ActionInject:
 		e.logger.Printf("[INJECT] rule=%q message=%q", match.Rule.Name, msg)
 		return &types.HookResponse{
-			Reason: msg,
+			AdditionalContext: msg,
 		}, nil
 
 	case types.ActionNotify:
@@ -61,10 +61,32 @@ func (e *Executor) Execute(match types.RuleMatch) (*types.HookResponse, error) {
 // expandTemplate replaces template variables in the message string with
 // values from the rule match context. Supported variables:
 //
-//	{count} — number of activities that triggered the match
+//	{count}   — number of activities that triggered the match
+//	{file}    — file_path from the first activity's tool_input
+//	{command} — command from the first activity's tool_input
 func expandTemplate(message string, match types.RuleMatch) string {
 	count := strconv.Itoa(len(match.Activities))
-	return strings.ReplaceAll(message, "{count}", count)
+	result := strings.ReplaceAll(message, "{count}", count)
+
+	// Extract {file} and {command} from the first activity's tool_input.
+	if len(match.Activities) > 0 {
+		input := match.Activities[0].Event.ToolInput
+		if filePath, ok := input["file_path"].(string); ok {
+			result = strings.ReplaceAll(result, "{file}", filePath)
+		} else {
+			result = strings.ReplaceAll(result, "{file}", "")
+		}
+		if command, ok := input["command"].(string); ok {
+			result = strings.ReplaceAll(result, "{command}", command)
+		} else {
+			result = strings.ReplaceAll(result, "{command}", "")
+		}
+	} else {
+		result = strings.ReplaceAll(result, "{file}", "")
+		result = strings.ReplaceAll(result, "{command}", "")
+	}
+
+	return result
 }
 
 // sendNotification attempts to send a macOS desktop notification using

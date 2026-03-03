@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jacklin/squawk/internal/types"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
 func TestDefault(t *testing.T) {

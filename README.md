@@ -61,7 +61,7 @@ track patterns asynchronously for future evaluation.
 ### Install
 
 ```bash
-go install github.com/jacklin/squawk/cmd/squawk@latest
+go install github.com/Jack-Lin-DS-AI/squawk/cmd/squawk@latest
 ```
 
 ### Initialize
@@ -211,7 +211,7 @@ Key design decisions:
 Contributions are welcome. To get started:
 
 ```bash
-git clone https://github.com/jacklin/squawk.git
+git clone https://github.com/Jack-Lin-DS-AI/squawk.git
 cd squawk
 go build ./...
 go test -race ./...

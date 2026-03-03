@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jacklin/squawk/internal/types"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
 // Tracker maintains a sliding window of recent activities per session.

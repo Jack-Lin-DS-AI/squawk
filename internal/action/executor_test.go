@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacklin/squawk/internal/types"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
 func newTestExecutor(t *testing.T) *Executor {

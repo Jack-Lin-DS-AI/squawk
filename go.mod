@@ -1,4 +1,4 @@
-module github.com/jacklin/squawk
+module github.com/Jack-Lin-DS-AI/squawk
 
 go 1.25.0
 

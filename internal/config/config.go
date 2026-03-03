@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jacklin/squawk/internal/types"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 	"gopkg.in/yaml.v3"
 )
 

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jacklin/squawk/internal/types"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
 // LogEntry represents a single entry in the action log file.

@@ -33,7 +33,7 @@ docs/                     — Research notes, rules catalog
 
 ## Conventions
 
-- Go 1.26, module: github.com/jacklin/squawk
+- Go 1.26, module: github.com/Jack-Lin-DS-AI/squawk
 - gofmt + goimports mandatory
 - Accept interfaces, return structs
 - Wrap errors with context: `fmt.Errorf("failed to X: %w", err)`

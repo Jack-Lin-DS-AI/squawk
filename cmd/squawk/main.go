@@ -17,11 +17,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jacklin/squawk/internal/action"
-	"github.com/jacklin/squawk/internal/config"
-	"github.com/jacklin/squawk/internal/monitor"
-	"github.com/jacklin/squawk/internal/rules"
-	"github.com/jacklin/squawk/internal/types"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/action"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/config"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/monitor"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/rules"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

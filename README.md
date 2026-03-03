@@ -74,6 +74,68 @@ squawk init
 This creates `.squawk/config.yaml` and prints a hooks snippet to add to your
 Claude Code `~/.claude/settings.json`.
 
+### Configure hooks
+
+#### Option A: HTTP Hooks (Recommended)
+
+Claude Code 1.0.33+ supports HTTP hooks natively. No shell scripts or `jq`
+required -- Claude Code POSTs event JSON directly to squawk.
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Edit|Write|Bash",
+      "hooks": [{"type": "http", "url": "http://localhost:3131/hooks/pre-tool-use", "timeout": 5}]
+    }],
+    "PostToolUse": [{
+      "matcher": "",
+      "hooks": [{"type": "http", "url": "http://localhost:3131/hooks/post-tool-use", "timeout": 5}]
+    }],
+    "PostToolUseFailure": [{
+      "matcher": "",
+      "hooks": [{"type": "http", "url": "http://localhost:3131/hooks/post-tool-use", "timeout": 5}]
+    }]
+  }
+}
+```
+
+#### Option B: Script Hooks (Universal)
+
+For older Claude Code versions that do not support HTTP hooks. Requires `jq`.
+
+```bash
+chmod +x scripts/hook.sh
+```
+
+Then add to `~/.claude/settings.json`, replacing `/path/to/squawk` with the
+actual path to your squawk checkout:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Edit|Write|Bash",
+      "hooks": [{"type": "command", "command": "/path/to/squawk/scripts/hook.sh PreToolUse"}]
+    }],
+    "PostToolUse": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "/path/to/squawk/scripts/hook.sh PostToolUse"}]
+    }],
+    "PostToolUseFailure": [{
+      "matcher": "",
+      "hooks": [{"type": "command", "command": "/path/to/squawk/scripts/hook.sh PostToolUseFailure"}]
+    }]
+  }
+}
+```
+
+The script reads hook JSON from stdin, forwards it to the squawk server, and
+translates the response into the format Claude Code expects. If squawk is not
+running, the script exits successfully so Claude Code continues uninterrupted.
+
 ### Start watching
 
 ```bash
@@ -106,12 +168,17 @@ Squawk ships with three rules enabled out of the box in `rules/default.yaml`:
 
 | Rule | Trigger | Action |
 |------|---------|--------|
-| `test-only-modification` | 3+ test file edits in 5 min with zero source reads or edits | block |
-| `excessive-retry-same-command` | Same command fails 3+ times in 3 min | block |
+| `test-only-modification` | 3+ test file edits in 5 min with zero source reads or edits | block (cooldown) |
+| `excessive-retry-same-command` | Same command fails 3+ times in 3 min | block (cooldown) |
 | `blind-file-creation` | 3+ new files created in 5 min with zero reads | inject |
 
 Each rule uses AND-logic across multiple conditions, correlating event counts
 and absence of expected actions within a sliding time window.
+
+Blocking rules include a cooldown period after firing. Once a block is issued,
+the rule will not fire again for a configurable duration (default 60 seconds).
+This prevents blocking spirals where the agent's recovery attempts are
+themselves blocked by the same rule.
 
 ## Rule Catalog
 
@@ -204,7 +271,31 @@ Key design decisions:
 - Zero external dependencies beyond cobra and yaml.v3
 - In-process sliding window -- no database, no Redis
 - Rules are pure YAML -- no scripting language, no Rego
-- Fail-open: if squawk is not running, hooks silently succeed (`|| true`)
+- Fail-open: if squawk is not running, hooks silently succeed
+
+### Subagent Detection
+
+Claude Code can spawn subagents (e.g., via the Task tool) that make their own
+tool calls. Squawk detects subagent behavior automatically because the parent
+session's hooks fire for all subagent tool calls. All subagents share the
+parent `session_id`, so their activity is tracked in the same sliding window as
+the parent session.
+
+This means squawk will block a subagent that edits test files without reading
+source code, retries a failing command excessively, or creates files blindly --
+the same rules apply regardless of which agent in the session is acting.
+
+### Fail-Open Design
+
+Squawk is designed to never interfere with Claude Code's availability:
+
+- If squawk is not running, hooks fail silently and Claude Code continues
+  normally. HTTP hooks return a connection error that Claude Code treats as a
+  no-op. Script hooks use `|| true` semantics.
+- HTTP hooks have a **5-second timeout**. If squawk takes longer than that to
+  respond, Claude Code proceeds as if the hook returned "allow".
+- Squawk never blocks Claude Code from starting or shutting down. It is a
+  sidecar process with no lifecycle coupling to the agent.
 
 ## Contributing
 

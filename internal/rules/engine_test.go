@@ -880,6 +880,168 @@ func TestScenario_MixedWorkflow_SourceEditResetsCounter(t *testing.T) {
 	}
 }
 
+// --- Cooldown Tests ---
+
+func TestCooldown_MatchThenSuppressThenMatchAgain(t *testing.T) {
+	now := time.Now()
+	rule := types.Rule{
+		Name:    "cooldown-rule",
+		Enabled: true,
+		Trigger: types.Trigger{
+			Logic: "and",
+			Conditions: []types.Condition{
+				{Event: "PostToolUse", Tool: "Bash", Count: 2, Within: "5m"},
+			},
+		},
+		Action: types.Action{
+			Type:     types.ActionBlock,
+			Message:  "blocked",
+			Cooldown: "30s",
+		},
+	}
+	engine := NewEngine([]types.Rule{rule})
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
+	}
+
+	// First evaluation: should match.
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("first eval: expected 1 match, got %d", len(matches))
+	}
+
+	// Second evaluation 10s later: within cooldown, should NOT match.
+	activities = append(activities, makeActivity("PostToolUse", "Bash", nil, now.Add(5*time.Second), "s1"))
+	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(10 * time.Second)})
+	if len(matches) != 0 {
+		t.Fatalf("during cooldown: expected 0 matches, got %d", len(matches))
+	}
+
+	// Third evaluation 31s later: cooldown expired, should match again.
+	activities = append(activities, makeActivity("PostToolUse", "Bash", nil, now.Add(30*time.Second), "s1"))
+	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(31 * time.Second)})
+	if len(matches) != 1 {
+		t.Fatalf("after cooldown: expected 1 match, got %d", len(matches))
+	}
+}
+
+func TestCooldown_DoesNotAffectOtherRules(t *testing.T) {
+	now := time.Now()
+	ruleA := types.Rule{
+		Name:    "rule-a",
+		Enabled: true,
+		Trigger: types.Trigger{
+			Logic:      "and",
+			Conditions: []types.Condition{{Event: "PostToolUse", Tool: "Bash"}},
+		},
+		Action: types.Action{
+			Type:     types.ActionBlock,
+			Message:  "blocked-a",
+			Cooldown: "1m",
+		},
+	}
+	ruleB := types.Rule{
+		Name:    "rule-b",
+		Enabled: true,
+		Trigger: types.Trigger{
+			Logic:      "and",
+			Conditions: []types.Condition{{Event: "PostToolUse", Tool: "Bash"}},
+		},
+		Action: types.Action{
+			Type:    types.ActionLog,
+			Message: "logged-b",
+			// No cooldown.
+		},
+	}
+	engine := NewEngine([]types.Rule{ruleA, ruleB})
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
+	}
+
+	// First evaluation: both should match.
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 2 {
+		t.Fatalf("first eval: expected 2 matches, got %d", len(matches))
+	}
+
+	// Second evaluation 10s later: rule-a in cooldown, rule-b should still match.
+	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(10 * time.Second)})
+	if len(matches) != 1 {
+		t.Fatalf("during cooldown: expected 1 match, got %d", len(matches))
+	}
+	if matches[0].Rule.Name != "rule-b" {
+		t.Errorf("expected rule-b to match, got %q", matches[0].Rule.Name)
+	}
+}
+
+func TestCooldown_NoCooldown_AlwaysMatches(t *testing.T) {
+	now := time.Now()
+	rule := types.Rule{
+		Name:    "no-cooldown",
+		Enabled: true,
+		Trigger: types.Trigger{
+			Logic:      "and",
+			Conditions: []types.Condition{{Event: "PostToolUse", Tool: "Edit"}},
+		},
+		Action: types.Action{
+			Type:    types.ActionLog,
+			Message: "logged",
+			// No cooldown field — should always match.
+		},
+	}
+	engine := NewEngine([]types.Rule{rule})
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", nil, now.Add(-1*time.Minute), "s1"),
+	}
+
+	// Evaluate multiple times in quick succession: all should match.
+	for i := 0; i < 5; i++ {
+		ts := now.Add(time.Duration(i) * time.Second)
+		matches := engine.Evaluate(activities, types.Event{Timestamp: ts})
+		if len(matches) != 1 {
+			t.Fatalf("eval %d: expected 1 match, got %d", i, len(matches))
+		}
+	}
+}
+
+func TestCooldown_ExactExpiry(t *testing.T) {
+	now := time.Now()
+	rule := types.Rule{
+		Name:    "exact-expiry",
+		Enabled: true,
+		Trigger: types.Trigger{
+			Logic:      "and",
+			Conditions: []types.Condition{{Event: "PostToolUse", Tool: "Bash"}},
+		},
+		Action: types.Action{
+			Type:     types.ActionBlock,
+			Message:  "blocked",
+			Cooldown: "30s",
+		},
+	}
+	engine := NewEngine([]types.Rule{rule})
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
+	}
+
+	// First evaluation: should match, sets cooldown expiry to now+30s.
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("first eval: expected 1 match, got %d", len(matches))
+	}
+
+	// Evaluate at exactly the cooldown expiry: now+30s is NOT before expiry, so should match.
+	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(30 * time.Second)})
+	if len(matches) != 1 {
+		t.Fatalf("at exact expiry: expected 1 match, got %d", len(matches))
+	}
+}
+
 // --- matchFilePattern unit tests ---
 
 func TestMatchFilePattern(t *testing.T) {
@@ -933,5 +1095,677 @@ func TestEvaluateNoActivities(t *testing.T) {
 	matches := engine.Evaluate(nil, types.Event{Timestamp: time.Now()})
 	if len(matches) != 0 {
 		t.Fatalf("expected 0 matches with no activities, got %d", len(matches))
+	}
+}
+
+// --- Helper to load actual default rules ---
+
+func loadTestRules(t *testing.T) []types.Rule {
+	t.Helper()
+	projectRoot := filepath.Join("..", "..", "rules")
+	rules, err := LoadRules(projectRoot)
+	if err != nil {
+		t.Fatalf("failed to load default rules: %v", err)
+	}
+	return rules
+}
+
+func findRule(t *testing.T, rules []types.Rule, name string) types.Rule {
+	t.Helper()
+	for _, r := range rules {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("rule %q not found in default rules", name)
+	return types.Rule{}
+}
+
+// =============================================================================
+// Scenario Tests: excessive-retry-same-command (priority 8)
+// Triggers: 3+ PostToolUseFailure Bash events within 3 minutes
+// =============================================================================
+
+func TestScenario_ExcessiveRetry_ThreeFailures_Blocked(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "excessive-retry-same-command")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-1*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected BLOCKED (3 Bash failures), got %d matches", len(matches))
+	}
+	if matches[0].Rule.Action.Type != types.ActionBlock {
+		t.Errorf("expected block action, got %q", matches[0].Rule.Action.Type)
+	}
+}
+
+func TestScenario_ExcessiveRetry_TwoFailures_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "excessive-retry-same-command")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 2 failures), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveRetry_OutsideWindow_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "excessive-retry-same-command")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 3 failures but spread beyond the 3-minute window
+	activities := []types.Activity{
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-5*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-4*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-3*time.Minute-1*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (failures outside 3m window), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveRetry_NonBashFailures_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "excessive-retry-same-command")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 3 failures but with Edit, not Bash
+	activities := []types.Activity{
+		makeActivity("PostToolUseFailure", "Edit", nil, now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Edit", nil, now.Add(-1*time.Minute), "s1"),
+		makeActivity("PostToolUseFailure", "Edit", nil, now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Edit failures, not Bash), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveRetry_PostToolUseSuccess_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "excessive-retry-same-command")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 3 Bash events but PostToolUse (success), not PostToolUseFailure
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Bash", nil, now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (success events, not failures), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveRetry_FourFailures_Blocked(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "excessive-retry-same-command")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-150*time.Second), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-100*time.Second), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-50*time.Second), "s1"),
+		makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-10*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected BLOCKED (4 failures exceeds threshold), got %d matches", len(matches))
+	}
+}
+
+// =============================================================================
+// Scenario Tests: blind-file-creation (priority 5)
+// Triggers: 3+ Write events + zero Read/Glob/Grep events within 5 minutes
+// =============================================================================
+
+func TestScenario_BlindFileCreation_ThreeWrites_NoReads_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Write", fileInput("/p/new1.go"), now.Add(-3*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new2.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new3.go"), now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (3 writes, no reads), got %d matches", len(matches))
+	}
+	if matches[0].Rule.Action.Type != types.ActionInject {
+		t.Errorf("expected inject action, got %q", matches[0].Rule.Action.Type)
+	}
+}
+
+func TestScenario_BlindFileCreation_WritesAfterRead_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Read", fileInput("/p/existing.go"), now.Add(-4*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new1.go"), now.Add(-3*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new2.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new3.go"), now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Read present), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_BlindFileCreation_WritesAfterGlob_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Glob", nil, now.Add(-4*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new1.go"), now.Add(-3*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new2.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new3.go"), now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Glob present), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_BlindFileCreation_WritesAfterGrep_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Grep", nil, now.Add(-4*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new1.go"), now.Add(-3*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new2.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new3.go"), now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Grep present), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_BlindFileCreation_TwoWrites_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Write", fileInput("/p/new1.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new2.go"), now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 2 writes), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_BlindFileCreation_OutsideWindow_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 3 writes but all outside the 5-minute window
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Write", fileInput("/p/new1.go"), now.Add(-8*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new2.go"), now.Add(-7*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new3.go"), now.Add(-6*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (writes outside 5m window), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_BlindFileCreation_EditsDontCount_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "blind-file-creation")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 3 Edits (not Writes) — blind-file-creation only tracks Write
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/file1.go"), now.Add(-3*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/file2.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/file3.go"), now.Add(-1*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Edit, not Write), got %d matches", len(matches))
+	}
+}
+
+// =============================================================================
+// Scenario Tests: same-file-excessive-edits (priority 6)
+// Triggers: 8+ Edit/Write events within 5 minutes
+// =============================================================================
+
+func TestScenario_ExcessiveEdits_EightEdits_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "same-file-excessive-edits")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	var activities []types.Activity
+	for i := 0; i < 8; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(8-i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (8 edits), got %d matches", len(matches))
+	}
+	if matches[0].Rule.Action.Type != types.ActionInject {
+		t.Errorf("expected inject action, got %q", matches[0].Rule.Action.Type)
+	}
+}
+
+func TestScenario_ExcessiveEdits_SevenEdits_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "same-file-excessive-edits")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	var activities []types.Activity
+	for i := 0; i < 7; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(7-i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 7 edits), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveEdits_OutsideWindow_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "same-file-excessive-edits")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 8 edits but all outside the 5-minute window
+	var activities []types.Activity
+	for i := 0; i < 8; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-6*time.Minute-time.Duration(i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (edits outside 5m window), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveEdits_MixedEditWrite_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "same-file-excessive-edits")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// Mix of Edit and Write totaling 8
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-4*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new.go"), now.Add(-210*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-3*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/other.go"), now.Add(-150*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-2*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-90*time.Second), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/config.go"), now.Add(-1*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (8 mixed Edit/Write), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveEdits_TenEdits_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "same-file-excessive-edits")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	var activities []types.Activity
+	for i := 0; i < 10; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(10-i)*20*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (10 edits exceeds threshold), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_ExcessiveEdits_ReadsDontCount_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "same-file-excessive-edits")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 7 edits + 3 reads = only 7 Edit/Write events
+	var activities []types.Activity
+	for i := 0; i < 7; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(10-i)*20*time.Second), "s1",
+		))
+	}
+	for i := 0; i < 3; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Read", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(3-i)*15*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 7 Edit/Write, Reads dont count), got %d matches", len(matches))
+	}
+}
+
+// =============================================================================
+// Scenario Tests: write-before-read (priority 4)
+// Triggers: 3+ Edit/Write events + zero Read/Glob/Grep events within 2 minutes
+// =============================================================================
+
+func TestScenario_WriteBeforeRead_ThreeEdits_NoReads_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-90*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/service.go"), now.Add(-60*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (3 edits, no reads), got %d matches", len(matches))
+	}
+	if matches[0].Rule.Action.Type != types.ActionInject {
+		t.Errorf("expected inject action, got %q", matches[0].Rule.Action.Type)
+	}
+}
+
+func TestScenario_WriteBeforeRead_WritesAfterGrep_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Grep", nil, now.Add(-100*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-90*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/service.go"), now.Add(-60*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Grep present), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_WriteBeforeRead_WritesAfterRead_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Read", fileInput("/p/existing.go"), now.Add(-100*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-90*time.Second), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new.go"), now.Add(-60*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Read present), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_WriteBeforeRead_OutsideWindow_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 3 edits but outside the 2-minute window
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-5*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/service.go"), now.Add(-4*time.Minute), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-3*time.Minute), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (edits outside 2m window), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_WriteBeforeRead_TwoEdits_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-60*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/service.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 2 edits), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_WriteBeforeRead_MixedEditWrite_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// Mix of Edit and Write, no reads
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-90*time.Second), "s1"),
+		makeActivity("PostToolUse", "Write", fileInput("/p/new.go"), now.Add(-60*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (3 mixed Edit/Write, no reads), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_WriteBeforeRead_GlobResets_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "write-before-read")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	activities := []types.Activity{
+		makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-100*time.Second), "s1"),
+		makeActivity("PostToolUse", "Glob", nil, now.Add(-80*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/service.go"), now.Add(-60*time.Second), "s1"),
+		makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-30*time.Second), "s1"),
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (Glob present), got %d matches", len(matches))
+	}
+}
+
+// =============================================================================
+// Scenario Tests: session-context-warning (priority 2)
+// Triggers: 50+ PostToolUse events within 30 minutes
+// =============================================================================
+
+func TestScenario_SessionContext_FiftyEvents_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "session-context-warning")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	var activities []types.Activity
+	for i := 0; i < 50; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(50-i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (50 events), got %d matches", len(matches))
+	}
+	if matches[0].Rule.Action.Type != types.ActionInject {
+		t.Errorf("expected inject action, got %q", matches[0].Rule.Action.Type)
+	}
+}
+
+func TestScenario_SessionContext_FortyNineEvents_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "session-context-warning")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	var activities []types.Activity
+	for i := 0; i < 49; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(49-i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 49 events), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_SessionContext_OutsideWindow_Allowed(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "session-context-warning")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 50 events but all outside the 30-minute window
+	var activities []types.Activity
+	for i := 0; i < 50; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-31*time.Minute-time.Duration(i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (events outside 30m window), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_SessionContext_MixedTools_Triggered(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "session-context-warning")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// session-context-warning has no tool filter — any PostToolUse counts
+	tools := []string{"Edit", "Write", "Read", "Bash", "Grep", "Glob"}
+	var activities []types.Activity
+	for i := 0; i < 50; i++ {
+		tool := tools[i%len(tools)]
+		activities = append(activities, makeActivity(
+			"PostToolUse", tool, nil,
+			now.Add(-time.Duration(50-i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 1 {
+		t.Fatalf("expected TRIGGERED (50 mixed tool events), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_SessionContext_SplitAcrossWindow_PartiallyCounted(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "session-context-warning")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 30 events inside window + 25 events outside window = only 30 count
+	var activities []types.Activity
+	for i := 0; i < 25; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-35*time.Minute-time.Duration(i)*time.Minute), "s1",
+		))
+	}
+	for i := 0; i < 30; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", fileInput("/p/handler.go"),
+			now.Add(-time.Duration(30-i)*time.Minute+30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 30 events in window), got %d matches", len(matches))
+	}
+}
+
+func TestScenario_SessionContext_PreToolUse_NotCounted(t *testing.T) {
+	rules := loadTestRules(t)
+	rule := findRule(t, rules, "session-context-warning")
+	engine := NewEngine([]types.Rule{rule})
+	now := time.Now()
+
+	// 30 PostToolUse + 25 PreToolUse — only PostToolUse events match the condition
+	var activities []types.Activity
+	for i := 0; i < 30; i++ {
+		activities = append(activities, makeActivity(
+			"PostToolUse", "Edit", nil,
+			now.Add(-time.Duration(50-i)*30*time.Second), "s1",
+		))
+	}
+	for i := 0; i < 25; i++ {
+		activities = append(activities, makeActivity(
+			"PreToolUse", "Edit", nil,
+			now.Add(-time.Duration(25-i)*30*time.Second), "s1",
+		))
+	}
+	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	if len(matches) != 0 {
+		t.Fatalf("expected ALLOWED (only 30 PostToolUse events), got %d matches", len(matches))
 	}
 }

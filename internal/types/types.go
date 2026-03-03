@@ -57,6 +57,7 @@ type Action struct {
 	Message   string     `yaml:"message" json:"message"`       // Message to send (block reason, inject prompt, notification text)
 	ToolScope string     `yaml:"tool_scope" json:"tool_scope"` // Regex: which tools the block applies to (empty = all)
 	FileScope string     `yaml:"file_scope" json:"file_scope"` // Glob: which files the block applies to (empty = all)
+	Cooldown  string     `yaml:"cooldown" json:"cooldown"`     // Duration string: "30s", "1m" — suppress re-triggering within this window
 }
 
 // Activity represents a tracked tool usage event for pattern detection.

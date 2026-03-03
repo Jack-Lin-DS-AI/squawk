@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
@@ -11,12 +12,17 @@ import (
 
 // Engine evaluates loaded rules against activity history and current events.
 type Engine struct {
-	rules []types.Rule
+	rules     []types.Rule
+	mu        sync.Mutex
+	cooldowns map[string]time.Time // rule name → cooldown expiry
 }
 
 // NewEngine creates a new rule evaluation engine with the given rules.
 func NewEngine(rules []types.Rule) *Engine {
-	return &Engine{rules: rules}
+	return &Engine{
+		rules:     rules,
+		cooldowns: make(map[string]time.Time),
+	}
 }
 
 // Rules returns the engine's loaded rules.
@@ -27,6 +33,9 @@ func (e *Engine) Rules() []types.Rule {
 // Evaluate checks all enabled rules against the activity history and current
 // event. It returns any rules that matched, sorted by priority (highest first).
 func (e *Engine) Evaluate(activities []types.Activity, currentEvent types.Event) []types.RuleMatch {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	var matches []types.RuleMatch
 
 	for _, rule := range e.rules {
@@ -45,6 +54,13 @@ func (e *Engine) Evaluate(activities []types.Activity, currentEvent types.Event)
 
 // evaluateRule checks a single rule against the activity history.
 func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, currentEvent types.Event) (types.RuleMatch, bool) {
+	// Check cooldown: skip this rule if it was triggered recently.
+	if rule.Action.Cooldown != "" {
+		if expiry, ok := e.cooldowns[rule.Name]; ok && currentEvent.Timestamp.Before(expiry) {
+			return types.RuleMatch{}, false
+		}
+	}
+
 	logic := rule.Trigger.Logic
 	if logic == "" {
 		logic = "and"
@@ -71,6 +87,13 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 				return types.RuleMatch{}, false
 			}
 			allMatched = appendUnique(allMatched, matched)
+		}
+	}
+
+	// Record cooldown expiry for this rule.
+	if rule.Action.Cooldown != "" {
+		if d, err := time.ParseDuration(rule.Action.Cooldown); err == nil {
+			e.cooldowns[rule.Name] = currentEvent.Timestamp.Add(d)
 		}
 	}
 

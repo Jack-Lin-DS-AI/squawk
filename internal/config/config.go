@@ -60,8 +60,9 @@ func Save(cfg *types.Config, path string) error {
 }
 
 // GenerateHooksConfig generates a Claude Code hooks settings.json snippet
-// that configures PreToolUse and PostToolUse hooks to POST events to the
-// squawk server running on the given port.
+// using HTTP hooks (preferred). Claude Code POSTs event JSON directly to
+// squawk's endpoints. Connection failures and timeouts are non-blocking,
+// so Claude Code continues if squawk is not running (fail-open).
 func GenerateHooksConfig(port int) (map[string]any, error) {
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("invalid port number: %d", port)
@@ -76,8 +77,66 @@ func GenerateHooksConfig(port int) (map[string]any, error) {
 					"matcher": "Edit|Write|Bash",
 					"hooks": []map[string]any{
 						{
+							"type":    "http",
+							"url":     fmt.Sprintf("%s/hooks/pre-tool-use", baseURL),
+							"timeout": 5,
+						},
+					},
+				},
+			},
+			"PostToolUse": []map[string]any{
+				{
+					"matcher": "",
+					"hooks": []map[string]any{
+						{
+							"type":    "http",
+							"url":     fmt.Sprintf("%s/hooks/post-tool-use", baseURL),
+							"timeout": 5,
+						},
+					},
+				},
+			},
+			"PostToolUseFailure": []map[string]any{
+				{
+					"matcher": "",
+					"hooks": []map[string]any{
+						{
+							"type":    "http",
+							"url":     fmt.Sprintf("%s/hooks/post-tool-use", baseURL),
+							"timeout": 5,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return hooks, nil
+}
+
+// GenerateScriptHooksConfig generates a Claude Code hooks settings.json
+// snippet using command hooks that invoke scripts/hook.sh. The script reads
+// stdin JSON, forwards to squawk, and translates the response into Claude
+// Code's expected format. Requires jq to be installed.
+func GenerateScriptHooksConfig(port int, scriptPath string) (map[string]any, error) {
+	if port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("invalid port number: %d", port)
+	}
+
+	portEnv := ""
+	if port != 3131 {
+		portEnv = fmt.Sprintf("SQUAWK_PORT=%d ", port)
+	}
+
+	hooks := map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []map[string]any{
+				{
+					"matcher": "Edit|Write|Bash",
+					"hooks": []map[string]any{
+						{
 							"type":    "command",
-							"command": fmt.Sprintf("curl -s --max-time 5 -X POST %s/hooks/pre-tool-use -H 'Content-Type: application/json' -d @- 2>/dev/null || true", baseURL),
+							"command": fmt.Sprintf("%s%s PreToolUse", portEnv, scriptPath),
 						},
 					},
 				},
@@ -88,7 +147,7 @@ func GenerateHooksConfig(port int) (map[string]any, error) {
 					"hooks": []map[string]any{
 						{
 							"type":    "command",
-							"command": fmt.Sprintf("curl -s --max-time 5 -X POST %s/hooks/post-tool-use -H 'Content-Type: application/json' -d @- 2>/dev/null || true", baseURL),
+							"command": fmt.Sprintf("%s%s PostToolUse", portEnv, scriptPath),
 						},
 					},
 				},
@@ -99,7 +158,7 @@ func GenerateHooksConfig(port int) (map[string]any, error) {
 					"hooks": []map[string]any{
 						{
 							"type":    "command",
-							"command": fmt.Sprintf("curl -s --max-time 5 -X POST %s/hooks/post-tool-use -H 'Content-Type: application/json' -d @- 2>/dev/null || true", baseURL),
+							"command": fmt.Sprintf("%s%s PostToolUseFailure", portEnv, scriptPath),
 						},
 					},
 				},

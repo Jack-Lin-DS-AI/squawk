@@ -29,6 +29,7 @@ rules:
       type: block
       tool_scope: "Edit|Write"
       file_scope: "*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js"
+      cooldown: "30s"
       message: |
         You have modified test files {count} times without reading the corresponding source code.
         Please read the implementation file first to understand why the test is failing.
@@ -47,6 +48,7 @@ rules:
           within: "3m"
     action:
       type: block
+      cooldown: "60s"
       message: |
         The same command has failed {count} times. Stop retrying and investigate the root cause.
         Consider reading error messages carefully or trying a different approach.

@@ -168,21 +168,29 @@ func TestGenerateHooksConfig(t *testing.T) {
 		t.Errorf("PreToolUse matcher: got %q, want %q", matcher, "Edit|Write|Bash")
 	}
 
-	// Verify PostToolUse hook command contains the correct URL.
+	// Verify PreToolUse hook uses HTTP type with correct URL.
+	preInnerHooks, ok := preToolUse[0]["hooks"].([]map[string]any)
+	if !ok || len(preInnerHooks) == 0 {
+		t.Fatal("expected PreToolUse hooks to be a non-empty slice")
+	}
+	if hookType, ok := preInnerHooks[0]["type"].(string); !ok || hookType != "http" {
+		t.Errorf("PreToolUse hook type: got %q, want %q", hookType, "http")
+	}
+	if url, ok := preInnerHooks[0]["url"].(string); !ok || url != "http://localhost:3131/hooks/pre-tool-use" {
+		t.Errorf("PreToolUse URL: got %q, want %q", url, "http://localhost:3131/hooks/pre-tool-use")
+	}
+
+	// Verify PostToolUse hook uses HTTP type with correct URL.
 	postToolUse, ok := hooksMap["PostToolUse"].([]map[string]any)
 	if !ok || len(postToolUse) == 0 {
 		t.Fatal("expected PostToolUse to be a non-empty slice")
 	}
-	innerHooks, ok := postToolUse[0]["hooks"].([]map[string]any)
-	if !ok || len(innerHooks) == 0 {
+	postInnerHooks, ok := postToolUse[0]["hooks"].([]map[string]any)
+	if !ok || len(postInnerHooks) == 0 {
 		t.Fatal("expected PostToolUse hooks to be a non-empty slice")
 	}
-	cmd, ok := innerHooks[0]["command"].(string)
-	if !ok {
-		t.Fatal("expected command to be a string")
-	}
-	if want := "http://localhost:3131/hooks/post-tool-use"; !containsSubstring(cmd, want) {
-		t.Errorf("PostToolUse command %q does not contain %q", cmd, want)
+	if url, ok := postInnerHooks[0]["url"].(string); !ok || url != "http://localhost:3131/hooks/post-tool-use" {
+		t.Errorf("PostToolUse URL: got %q, want %q", url, "http://localhost:3131/hooks/post-tool-use")
 	}
 }
 
@@ -215,10 +223,59 @@ func TestGenerateHooksConfigCustomPort(t *testing.T) {
 	hooksMap := hooks["hooks"].(map[string]any)
 	preToolUse := hooksMap["PreToolUse"].([]map[string]any)
 	innerHooks := preToolUse[0]["hooks"].([]map[string]any)
+	url, ok := innerHooks[0]["url"].(string)
+	if !ok {
+		t.Fatal("expected url to be a string")
+	}
+
+	if want := "http://localhost:8080/hooks/pre-tool-use"; url != want {
+		t.Errorf("url: got %q, want %q", url, want)
+	}
+}
+
+func TestGenerateScriptHooksConfig(t *testing.T) {
+	hooks, err := GenerateScriptHooksConfig(3131, "/usr/local/bin/hook.sh")
+	if err != nil {
+		t.Fatalf("GenerateScriptHooksConfig() error: %v", err)
+	}
+
+	hooksMap, ok := hooks["hooks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected 'hooks' key with map value")
+	}
+
+	expectedKeys := []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+	for _, key := range expectedKeys {
+		if _, ok := hooksMap[key]; !ok {
+			t.Errorf("missing hook key %q", key)
+		}
+	}
+
+	// Verify PreToolUse uses command type with script path.
+	preToolUse := hooksMap["PreToolUse"].([]map[string]any)
+	innerHooks := preToolUse[0]["hooks"].([]map[string]any)
+	cmd, ok := innerHooks[0]["command"].(string)
+	if !ok {
+		t.Fatal("expected command to be a string")
+	}
+	if want := "/usr/local/bin/hook.sh PreToolUse"; cmd != want {
+		t.Errorf("command: got %q, want %q", cmd, want)
+	}
+}
+
+func TestGenerateScriptHooksConfigCustomPort(t *testing.T) {
+	hooks, err := GenerateScriptHooksConfig(8080, "./scripts/hook.sh")
+	if err != nil {
+		t.Fatalf("GenerateScriptHooksConfig() error: %v", err)
+	}
+
+	hooksMap := hooks["hooks"].(map[string]any)
+	preToolUse := hooksMap["PreToolUse"].([]map[string]any)
+	innerHooks := preToolUse[0]["hooks"].([]map[string]any)
 	cmd := innerHooks[0]["command"].(string)
 
-	if want := "http://localhost:8080/hooks/pre-tool-use"; !containsSubstring(cmd, want) {
-		t.Errorf("command %q does not contain %q", cmd, want)
+	if want := "SQUAWK_PORT=8080 ./scripts/hook.sh PreToolUse"; cmd != want {
+		t.Errorf("command: got %q, want %q", cmd, want)
 	}
 }
 

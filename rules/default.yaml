@@ -1,0 +1,74 @@
+rules:
+  - name: test-only-modification
+    description: "Detect repeated test file modifications without checking source code"
+    enabled: true
+    priority: 10
+    trigger:
+      logic: and
+      conditions:
+        # Condition 1: 3+ edits of test files within 5 minutes
+        - event: PostToolUse
+          tool: "Edit|Write"
+          file_pattern: "*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js"
+          count: 3
+          within: "5m"
+        # Condition 2: No Read/Glob/Grep of any file (no code exploration)
+        - event: PostToolUse
+          tool: "Read|Glob|Grep"
+          negate: true
+          count: 1
+          within: "5m"
+        # Condition 3: No Edit/Write of non-test files (no source code changes)
+        - event: PostToolUse
+          tool: "Edit|Write"
+          file_pattern_exclude: "*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js"
+          negate: true
+          count: 1
+          within: "5m"
+    action:
+      type: block
+      tool_scope: "Edit|Write"
+      file_scope: "*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js"
+      message: |
+        You have modified test files {count} times without reading the corresponding source code.
+        Please read the implementation file first to understand why the test is failing.
+        The issue may be in the source code, not the test.
+
+  - name: excessive-retry-same-command
+    description: "Detect running the same failing command repeatedly"
+    enabled: true
+    priority: 8
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUseFailure
+          tool: "Bash"
+          count: 3
+          within: "3m"
+    action:
+      type: block
+      message: |
+        The same command has failed {count} times. Stop retrying and investigate the root cause.
+        Consider reading error messages carefully or trying a different approach.
+
+  - name: blind-file-creation
+    description: "Detect creating new files without reading existing ones first"
+    enabled: true
+    priority: 5
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Write"
+          count: 3
+          within: "5m"
+        - event: PostToolUse
+          tool: "Read|Glob|Grep"
+          negate: true
+          count: 1
+          within: "5m"
+    action:
+      type: inject
+      message: |
+        You are creating many new files without reading existing code.
+        Please explore the codebase first to avoid duplicating existing functionality.

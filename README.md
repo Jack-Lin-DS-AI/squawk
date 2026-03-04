@@ -5,49 +5,65 @@ Stateful behavioral pattern detection for AI coding agents.
 Squawk monitors [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 tool usage via hooks and detects behavioral anti-patterns that emerge across
 multiple actions over time — loops, oscillation, escalating bad habits — that
-no single-event hook can catch. It keeps a sliding window of recent activity
-and evaluates rules against the full history.
+no single-event hook can catch.
 
 ## Quick Start
 
 ```bash
-# Install
 go install github.com/Jack-Lin-DS-AI/squawk/cmd/squawk@latest
-
-# One-command setup: config + hooks + background daemon
-cd your-project
-squawk setup
+cd your-project && squawk setup
 ```
 
 Restart Claude Code and squawk is active. `squawk setup` is idempotent.
 
 ```bash
-squawk status                  # daemon + hooks + sessions
-squawk stop                    # stop the daemon
-squawk teardown                # stop + remove hooks
-squawk stats                   # intervention metrics
-squawk log --tail 20           # recent action log
+squawk status          # daemon + hooks + sessions
+squawk stop            # stop the daemon
+squawk teardown        # stop + remove hooks
+squawk stats           # intervention metrics
+squawk log --tail 20   # recent action log
 ```
 
-## Built-in Rules
+## Built-in Rules (13)
+
+**Counter-based** — count events within a time window:
 
 | Rule | Trigger | Action |
 |------|---------|--------|
-| `test-only-modification` | 3+ test edits, zero source reads (5 min) | block (30s cooldown) |
-| `excessive-retry-same-command` | Same command fails 3+ times (3 min) | block (60s cooldown) |
+| `test-only-modification` | 3+ test edits, zero source reads (5 min) | block |
+| `excessive-retry-same-command` | Bash fails 3+ times (3 min) | block |
 | `blind-file-creation` | 3+ file creates, zero reads (5 min) | inject |
 | `same-file-excessive-edits` | 8+ edits (5 min) | inject |
 | `write-before-read` | 3+ writes, zero reads (2 min) | inject |
 | `session-context-warning` | 50+ tool calls (30 min) | inject |
 
+**Hash-based** — detect identical/oscillating operations via FNV-1a hashing:
+
+| Rule | Trigger | Action |
+|------|---------|--------|
+| `edit-oscillation` | File content reverts to previous state (10 min) | block |
+| `repeated-identical-edit` | Same (file, old, new) edit 3+ times (5 min) | block |
+| `repeated-failing-command` | Exact same command fails 3+ times (3 min) | block |
+| `whole-file-rewrite` | Write on already-read/edited files 2+ times (5 min) | inject |
+
+**Diff-based** — regex/ratio analysis on edit content:
+
+| Rule | Trigger | Action |
+|------|---------|--------|
+| `test-assertion-weakening` | Removes assert/expect from test files 2+ times (5 min) | block |
+| `error-handling-removal` | Removes `if err != nil`/`try`/`catch` 2+ times (5 min) | block |
+| `large-code-deletion` | Edit shrinks code >50% 3+ times (5 min) | inject |
+
+See [docs/RULES_CATALOG.md](docs/RULES_CATALOG.md) for detailed descriptions.
+
 ## Managing Rules
 
 ```bash
-squawk rules list                          # show all rules
-squawk rules enable/disable <name>         # toggle + hot-reload
-squawk rules remove <name> --force         # permanently remove
-squawk rules add                           # interactive creation
-squawk rules test --scenario <name>        # test against simulated events
+squawk rules list                      # show all rules
+squawk rules enable/disable <name>     # toggle + hot-reload
+squawk rules remove <name> --force     # permanently remove
+squawk rules add                       # interactive creation
+squawk rules test --scenario <name>    # test against simulated events
 ```
 
 ## Custom Rules
@@ -60,7 +76,7 @@ rules:
     enabled: true
     priority: 5
     trigger:
-      logic: and
+      logic: and   # "and" (default) or "or"
       conditions:
         - event: PostToolUse
           tool: "Edit|Write"
@@ -74,8 +90,22 @@ rules:
         Verify these changes are intentional.
 ```
 
-Condition fields: `event`, `tool` (regex), `file_pattern` / `file_pattern_exclude` (glob), `count`, `within`, `negate`.
-Action types: `block`, `inject`, `notify`, `log`.
+**Condition fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event` | string | Hook event: `PreToolUse`, `PostToolUse`, `PostToolUseFailure` |
+| `tool` | regex | Tool name: `"Edit\|Write"`, `"Bash"` |
+| `file_pattern` | glob | Include files: `"*_test.go\|*.test.ts"` |
+| `file_pattern_exclude` | glob | Exclude files |
+| `count` | int | Occurrence threshold (default 1) |
+| `within` | duration | Time window: `"5m"`, `"30s"` |
+| `negate` | bool | Invert condition (true = absence check) |
+| `hash_mode` | string | `"content"`, `"edit"`, `"command"`, `"known_file"` |
+| `diff_pattern` | regex | Pattern present in old_string but absent in new_string |
+| `diff_shrink_ratio` | float | 0-1: trigger when `len(new) < ratio * len(old)` |
+
+**Action types:** `block`, `inject`, `notify`, `log`. Optional `cooldown` suppresses re-triggering.
 
 ## Design
 

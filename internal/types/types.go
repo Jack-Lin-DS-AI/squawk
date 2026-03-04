@@ -32,13 +32,16 @@ type Trigger struct {
 
 // Condition defines a single condition within a trigger.
 type Condition struct {
-	Event              string `yaml:"event" json:"event"`                               // Hook event name: PreToolUse, PostToolUse, etc.
-	Tool               string `yaml:"tool" json:"tool"`                                  // Tool name regex: "Edit|Write"
-	FilePattern        string `yaml:"file_pattern" json:"file_pattern"`                  // Glob pattern: match files (e.g. "*_test.go")
-	FilePatternExclude string `yaml:"file_pattern_exclude" json:"file_pattern_exclude"`  // Glob pattern: exclude files (match anything NOT matching this)
-	Count              int    `yaml:"count" json:"count"`                                // Number of occurrences to trigger
-	Within             string `yaml:"within" json:"within"`                              // Time window: "5m", "10m"
-	Negate             bool   `yaml:"negate" json:"negate"`                              // Negate this condition
+	Event              string  `yaml:"event" json:"event"`                               // Hook event name: PreToolUse, PostToolUse, etc.
+	Tool               string  `yaml:"tool" json:"tool"`                                  // Tool name regex: "Edit|Write"
+	FilePattern        string  `yaml:"file_pattern" json:"file_pattern"`                  // Glob pattern: match files (e.g. "*_test.go")
+	FilePatternExclude string  `yaml:"file_pattern_exclude" json:"file_pattern_exclude"`  // Glob pattern: exclude files (match anything NOT matching this)
+	Count              int     `yaml:"count" json:"count"`                                // Number of occurrences to trigger
+	Within             string  `yaml:"within" json:"within"`                              // Time window: "5m", "10m"
+	Negate             bool    `yaml:"negate" json:"negate"`                              // Negate this condition
+	HashMode           string  `yaml:"hash_mode" json:"hash_mode"`                       // "content"|"edit"|"command"|"known_file"|""
+	DiffPattern        string  `yaml:"diff_pattern" json:"diff_pattern"`                  // Regex: present in old_string, absent in new_string → "removal"
+	DiffShrinkRatio    float64 `yaml:"diff_shrink_ratio" json:"diff_shrink_ratio"`        // 0-1: trigger when len(new) < ratio * len(old)
 }
 
 // ActionType defines what kind of action to take.

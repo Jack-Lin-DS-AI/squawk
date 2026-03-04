@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"hash/fnv"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -74,7 +75,7 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 	switch rule.Trigger.Logic {
 	case "or":
 		for _, cond := range rule.Trigger.Conditions {
-			matched, ok := evaluateCondition(cond, activities, currentEvent)
+			matched, ok := evaluateCondition(cond, activities, activities, currentEvent)
 			if ok {
 				allMatched = appendUnique(allMatched, matched)
 			}
@@ -85,7 +86,7 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 
 	default: // "and"
 		for _, cond := range rule.Trigger.Conditions {
-			matched, ok := evaluateCondition(cond, activities, currentEvent)
+			matched, ok := evaluateCondition(cond, activities, activities, currentEvent)
 			if !ok {
 				return types.RuleMatch{}, false
 			}
@@ -109,7 +110,8 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 
 // evaluateCondition checks a single condition against the activity history.
 // For negated conditions, it returns true when the condition is NOT met.
-func evaluateCondition(cond types.Condition, activities []types.Activity, currentEvent types.Event) ([]types.Activity, bool) {
+// allActivities is the unfiltered set, needed by known_file hash mode.
+func evaluateCondition(cond types.Condition, activities, allActivities []types.Activity, currentEvent types.Event) ([]types.Activity, bool) {
 	// Determine the time window.
 	window := time.Duration(0)
 	if cond.Within != "" {
@@ -142,6 +144,16 @@ func evaluateCondition(cond types.Condition, activities []types.Activity, curren
 			continue
 		}
 		matched = append(matched, act)
+	}
+
+	// Apply hash filter if hash_mode is set.
+	if cond.HashMode != "" {
+		matched = hashFilterActivities(cond.HashMode, matched, allActivities)
+	}
+
+	// Apply diff filter if diff_pattern or diff_shrink_ratio is set.
+	if cond.DiffPattern != "" || cond.DiffShrinkRatio != 0 {
+		matched = diffFilterActivities(cond.DiffPattern, cond.DiffShrinkRatio, matched)
 	}
 
 	requiredCount := cond.Count
@@ -249,4 +261,174 @@ func sortMatchesByPriority(matches []types.RuleMatch) {
 	slices.SortFunc(matches, func(a, b types.RuleMatch) int {
 		return b.Rule.Priority - a.Rule.Priority
 	})
+}
+
+// --- Hash filter helpers ---
+
+// hashFilterActivities applies hash-based deduplication/detection to matched
+// activities. The mode determines the hashing strategy.
+func hashFilterActivities(mode string, matched, allActivities []types.Activity) []types.Activity {
+	switch mode {
+	case "content":
+		return contentHashFilter(matched)
+	case "edit":
+		return groupHashFilter(matched, editHash)
+	case "command":
+		return groupHashFilter(matched, commandHash)
+	case "known_file":
+		return knownFileFilter(matched, allActivities)
+	default:
+		return matched
+	}
+}
+
+// contentHashFilter detects A→B→A oscillation. For each file, it tracks
+// content hashes in order and flags activities whose hash was already seen
+// for that file (reversion to a previous state).
+func contentHashFilter(activities []types.Activity) []types.Activity {
+	// Per-file hash history: file_path → list of hashes seen.
+	fileHashes := make(map[string][]uint64)
+	var result []types.Activity
+
+	for _, act := range activities {
+		filePath, _ := act.Event.ToolInput["file_path"].(string)
+		if filePath == "" {
+			continue
+		}
+		h := contentHash(act)
+		history := fileHashes[filePath]
+
+		// Check if this hash was already seen (not counting the immediately
+		// previous entry — that would be "no change", which is a separate concern).
+		seen := false
+		for i, prev := range history {
+			if prev == h && i < len(history)-1 {
+				// Hash matches a non-last entry → content reverted.
+				seen = true
+				break
+			}
+		}
+		if seen {
+			result = append(result, act)
+		}
+		fileHashes[filePath] = append(history, h)
+	}
+	return result
+}
+
+// groupHashFilter groups activities by a hash function and returns activities
+// from groups with 2+ members (i.e., repeated identical operations).
+func groupHashFilter(activities []types.Activity, hashFn func(types.Activity) uint64) []types.Activity {
+	groups := make(map[uint64][]types.Activity)
+	for _, act := range activities {
+		h := hashFn(act)
+		groups[h] = append(groups[h], act)
+	}
+	var result []types.Activity
+	for _, group := range groups {
+		if len(group) >= 2 {
+			result = append(result, group...)
+		}
+	}
+	return result
+}
+
+// knownFileFilter returns Write activities that target files already seen
+// in Read or Edit activities from the full activity set.
+func knownFileFilter(matched, allActivities []types.Activity) []types.Activity {
+	// Build set of known file paths from Read/Edit activities.
+	known := make(map[string]bool)
+	for _, act := range allActivities {
+		tool := act.Event.ToolName
+		if tool == "Read" || tool == "Edit" {
+			if fp, ok := act.Event.ToolInput["file_path"].(string); ok && fp != "" {
+				known[fp] = true
+			}
+		}
+	}
+
+	// Filter matched (Write) activities to only those targeting known files.
+	var result []types.Activity
+	for _, act := range matched {
+		if fp, ok := act.Event.ToolInput["file_path"].(string); ok && known[fp] {
+			result = append(result, act)
+		}
+	}
+	return result
+}
+
+// contentHash hashes (file_path, content/new_string) using FNV-1a.
+func contentHash(act types.Activity) uint64 {
+	h := fnv.New64a()
+	fp, _ := act.Event.ToolInput["file_path"].(string)
+	h.Write([]byte(fp))
+	h.Write([]byte{0}) // delimiter
+
+	// Use new_string (Edit) or content (Write) as the content.
+	if ns, ok := act.Event.ToolInput["new_string"].(string); ok {
+		h.Write([]byte(ns))
+	} else if c, ok := act.Event.ToolInput["content"].(string); ok {
+		h.Write([]byte(c))
+	}
+	return h.Sum64()
+}
+
+// editHash hashes (file_path, old_string, new_string) using FNV-1a.
+func editHash(act types.Activity) uint64 {
+	h := fnv.New64a()
+	fp, _ := act.Event.ToolInput["file_path"].(string)
+	h.Write([]byte(fp))
+	h.Write([]byte{0})
+	os, _ := act.Event.ToolInput["old_string"].(string)
+	h.Write([]byte(os))
+	h.Write([]byte{0})
+	ns, _ := act.Event.ToolInput["new_string"].(string)
+	h.Write([]byte(ns))
+	return h.Sum64()
+}
+
+// commandHash hashes the command string from Bash ToolInput using FNV-1a.
+func commandHash(act types.Activity) uint64 {
+	h := fnv.New64a()
+	cmd, _ := act.Event.ToolInput["command"].(string)
+	h.Write([]byte(cmd))
+	return h.Sum64()
+}
+
+// --- Diff filter helpers ---
+
+// diffFilterActivities filters Edit activities based on diff analysis.
+// If pattern is set, keeps activities where old_string matches the regex
+// but new_string does not (pattern removal). If shrinkRatio > 0, keeps
+// activities where len(new_string) < ratio * len(old_string).
+func diffFilterActivities(pattern string, shrinkRatio float64, activities []types.Activity) []types.Activity {
+	var patternRe *regexp.Regexp
+	if pattern != "" {
+		var err error
+		patternRe, err = regexp.Compile(pattern)
+		if err != nil {
+			return nil
+		}
+	}
+
+	var result []types.Activity
+	for _, act := range activities {
+		oldStr, _ := act.Event.ToolInput["old_string"].(string)
+		newStr, _ := act.Event.ToolInput["new_string"].(string)
+
+		if patternRe != nil {
+			if patternRe.MatchString(oldStr) && !patternRe.MatchString(newStr) {
+				result = append(result, act)
+				continue
+			}
+		}
+
+		if shrinkRatio > 0 && oldStr != "" {
+			if float64(len(newStr)) < shrinkRatio*float64(len(oldStr)) {
+				result = append(result, act)
+				continue
+			}
+		}
+	}
+	return result
 }

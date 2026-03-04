@@ -129,3 +129,139 @@ rules:
       message: |
         This session has had {count} tool interactions. Context degradation may cause instruction drift.
         Consider running /compact with a task summary, or /clear if switching tasks.
+
+  # --- Hash-based detection rules ---
+
+  - name: edit-oscillation
+    description: "Detect A→B→A code oscillation via content hashing"
+    enabled: true
+    priority: 9
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit|Write"
+          hash_mode: content
+          count: 1
+          within: "10m"
+    action:
+      type: block
+      cooldown: "30s"
+      message: |
+        Code oscillation detected: you reverted a file to a previous state.
+        This suggests you are going back and forth. Stop and reconsider your approach.
+
+  - name: repeated-identical-edit
+    description: "Detect the same old→new transformation applied repeatedly"
+    enabled: true
+    priority: 7
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit"
+          hash_mode: edit
+          count: 3
+          within: "5m"
+    action:
+      type: block
+      cooldown: "30s"
+      message: |
+        The same edit has been applied {count} times. This identical transformation keeps being repeated.
+        Read the file and error output to understand why the edit is not having the desired effect.
+
+  - name: repeated-failing-command
+    description: "Detect running the exact same failing command repeatedly"
+    enabled: true
+    priority: 8
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUseFailure
+          tool: "Bash"
+          hash_mode: command
+          count: 3
+          within: "3m"
+    action:
+      type: block
+      cooldown: "60s"
+      message: |
+        The exact same command has failed {count} times. Repeating it will not fix the issue.
+        Read the error output carefully and try a different approach.
+
+  - name: whole-file-rewrite
+    description: "Detect using Write on files that already exist (prefer Edit)"
+    enabled: true
+    priority: 5
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Write"
+          hash_mode: known_file
+          count: 2
+          within: "5m"
+    action:
+      type: inject
+      message: |
+        You are rewriting files that already exist using the Write tool.
+        Use the Edit tool for targeted modifications to preserve existing code and avoid losing work.
+
+  # --- Diff-based detection rules ---
+
+  - name: test-assertion-weakening
+    description: "Detect progressive removal of test assertions"
+    enabled: true
+    priority: 9
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit"
+          file_pattern: "*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js"
+          diff_pattern: "(assert|expect|require\\.|should\\.|must\\.|assertEqual|assertTrue|assertFalse|assertNil|assertNotNil)"
+          count: 2
+          within: "5m"
+    action:
+      type: block
+      cooldown: "30s"
+      message: |
+        Test assertions are being removed. You are weakening test coverage instead of fixing the code.
+        Read the source code to fix the root cause rather than making tests pass by removing checks.
+
+  - name: error-handling-removal
+    description: "Detect progressive removal of error handling code"
+    enabled: true
+    priority: 8
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit"
+          diff_pattern: "(if err != nil|try \\{|catch \\(|\\.catch\\(|except |rescue )"
+          count: 2
+          within: "5m"
+    action:
+      type: block
+      cooldown: "30s"
+      message: |
+        Error handling code is being removed. Suppressing errors will cause failures at runtime.
+        Fix the underlying issue instead of removing error checks.
+
+  - name: large-code-deletion
+    description: "Detect repeated edits that remove significantly more code than they add"
+    enabled: true
+    priority: 6
+    trigger:
+      logic: and
+      conditions:
+        - event: PostToolUse
+          tool: "Edit"
+          diff_shrink_ratio: 0.5
+          count: 3
+          within: "5m"
+    action:
+      type: inject
+      message: |
+        Multiple edits are deleting large amounts of code. Verify this is intentional.
+        If you are struggling with implementation, read related files for context before removing code.

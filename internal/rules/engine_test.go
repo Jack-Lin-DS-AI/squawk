@@ -3,6 +3,7 @@ package rules
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,18 @@ func makeActivity(eventName, toolName string, toolInput map[string]any, ts time.
 
 func fileInput(path string) map[string]any {
 	return map[string]any{"file_path": path}
+}
+
+func editInput(path, old, new string) map[string]any {
+	return map[string]any{"file_path": path, "old_string": old, "new_string": new}
+}
+
+func writeInput(path, content string) map[string]any {
+	return map[string]any{"file_path": path, "content": content}
+}
+
+func bashInput(command string) map[string]any {
+	return map[string]any{"command": command}
 }
 
 // nActivities generates n activities evenly spaced ending at spacing before ref.
@@ -1074,6 +1087,353 @@ func TestScenarios_WriteBeforeRead(t *testing.T) {
 				makeActivity("PostToolUse", "Glob", nil, now.Add(-80*time.Second), "s1"),
 				makeActivity("PostToolUse", "Edit", fileInput("/p/service.go"), now.Add(-60*time.Second), "s1"),
 				makeActivity("PostToolUse", "Edit", fileInput("/p/model.go"), now.Add(-30*time.Second), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+// =============================================================================
+// Hash/Diff Helper Unit Tests
+// =============================================================================
+
+func TestContentHash_Determinism(t *testing.T) {
+	act := makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), time.Now(), "s1")
+	h1 := contentHash(act)
+	h2 := contentHash(act)
+	if h1 != h2 {
+		t.Errorf("contentHash not deterministic: %d != %d", h1, h2)
+	}
+}
+
+func TestContentHash_DifferentPaths(t *testing.T) {
+	act1 := makeActivity("PostToolUse", "Edit", editInput("/p/a.go", "", "body"), time.Now(), "s1")
+	act2 := makeActivity("PostToolUse", "Edit", editInput("/p/b.go", "", "body"), time.Now(), "s1")
+	if contentHash(act1) == contentHash(act2) {
+		t.Error("contentHash should differ for different file paths")
+	}
+}
+
+func TestEditHash_Determinism(t *testing.T) {
+	act := makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), time.Now(), "s1")
+	h1 := editHash(act)
+	h2 := editHash(act)
+	if h1 != h2 {
+		t.Errorf("editHash not deterministic: %d != %d", h1, h2)
+	}
+}
+
+func TestEditHash_DifferentEdits(t *testing.T) {
+	act1 := makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old1", "new1"), time.Now(), "s1")
+	act2 := makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old2", "new2"), time.Now(), "s1")
+	if editHash(act1) == editHash(act2) {
+		t.Error("editHash should differ for different old/new strings")
+	}
+}
+
+func TestCommandHash_Determinism(t *testing.T) {
+	act := makeActivity("PostToolUseFailure", "Bash", bashInput("go test ./..."), time.Now(), "s1")
+	h1 := commandHash(act)
+	h2 := commandHash(act)
+	if h1 != h2 {
+		t.Errorf("commandHash not deterministic: %d != %d", h1, h2)
+	}
+}
+
+func TestCommandHash_DifferentCommands(t *testing.T) {
+	act1 := makeActivity("PostToolUseFailure", "Bash", bashInput("go test ./..."), time.Now(), "s1")
+	act2 := makeActivity("PostToolUseFailure", "Bash", bashInput("go build ./..."), time.Now(), "s1")
+	if commandHash(act1) == commandHash(act2) {
+		t.Error("commandHash should differ for different commands")
+	}
+}
+
+func TestDiffFilterActivities_PatternMatch(t *testing.T) {
+	now := time.Now()
+	acts := []types.Activity{
+		// old has assert, new does not → removal
+		makeActivity("PostToolUse", "Edit", editInput("/p/foo_test.go", "assert.Equal(t, 1, 1)", "// removed"), now, "s1"),
+		// old has assert, new also has assert → no removal
+		makeActivity("PostToolUse", "Edit", editInput("/p/bar_test.go", "assert.Equal(t, 1, 1)", "assert.Equal(t, 2, 2)"), now, "s1"),
+	}
+	result := diffFilterActivities("assert", 0, acts)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+}
+
+func TestDiffFilterActivities_ShrinkRatio(t *testing.T) {
+	now := time.Now()
+	acts := []types.Activity{
+		// old=100 chars, new=40 chars → 40 < 0.5*100 → shrink detected
+		makeActivity("PostToolUse", "Edit", editInput("/p/foo.go",
+			strings.Repeat("x", 100), strings.Repeat("y", 40)), now, "s1"),
+		// old=100 chars, new=60 chars → 60 >= 0.5*100 → no shrink
+		makeActivity("PostToolUse", "Edit", editInput("/p/bar.go",
+			strings.Repeat("x", 100), strings.Repeat("y", 60)), now, "s1"),
+		// old is empty → skip
+		makeActivity("PostToolUse", "Edit", editInput("/p/baz.go",
+			"", strings.Repeat("y", 10)), now, "s1"),
+	}
+	result := diffFilterActivities("", 0.5, acts)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+}
+
+// =============================================================================
+// Default Rule Scenario Tests — Hash/Diff Rules
+// =============================================================================
+
+func TestScenarios_EditOscillation(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "edit-oscillation")
+	now := time.Now()
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "A→B→A triggers",
+			activities: []types.Activity{
+				// State A
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateA"), now.Add(-3*time.Minute), "s1"),
+				// State B
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateB"), now.Add(-2*time.Minute), "s1"),
+				// Back to State A
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateA"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionBlock,
+		},
+		{
+			name: "A→B→C does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateA"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateB"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateC"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "different files dont cross-trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/a.go", "", "stateA"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/b.go", "", "stateB"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/a.go", "", "stateB"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "outside window does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateA"), now.Add(-15*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateB"), now.Add(-12*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "", "stateA"), now.Add(-11*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+func TestScenarios_RepeatedIdenticalEdit(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "repeated-identical-edit")
+	now := time.Now()
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "same edit 3x triggers",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionBlock,
+		},
+		{
+			name: "same edit 2x does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old", "new"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "different edits dont trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old1", "new1"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old2", "new2"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo.go", "old3", "new3"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+func TestScenarios_RepeatedFailingCommand(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "repeated-failing-command")
+	now := time.Now()
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "same cmd 3x failure triggers",
+			activities: []types.Activity{
+				makeActivity("PostToolUseFailure", "Bash", bashInput("go test ./..."), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUseFailure", "Bash", bashInput("go test ./..."), now.Add(-1*time.Minute), "s1"),
+				makeActivity("PostToolUseFailure", "Bash", bashInput("go test ./..."), now.Add(-30*time.Second), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionBlock,
+		},
+		{
+			name: "different cmds dont trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUseFailure", "Bash", bashInput("go test ./..."), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUseFailure", "Bash", bashInput("go build ./..."), now.Add(-1*time.Minute), "s1"),
+				makeActivity("PostToolUseFailure", "Bash", bashInput("go vet ./..."), now.Add(-30*time.Second), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "success events not counted",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Bash", bashInput("go test ./..."), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Bash", bashInput("go test ./..."), now.Add(-1*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Bash", bashInput("go test ./..."), now.Add(-30*time.Second), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+func TestScenarios_WholeFileRewrite(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "whole-file-rewrite")
+	now := time.Now()
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "write after read triggers",
+			activities: []types.Activity{
+				// Read the file first (establishes it as known).
+				makeActivity("PostToolUse", "Read", fileInput("/p/handler.go"), now.Add(-4*time.Minute), "s1"),
+				// Then rewrite it twice with Write.
+				makeActivity("PostToolUse", "Write", writeInput("/p/handler.go", "rewrite1"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Write", writeInput("/p/handler.go", "rewrite2"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionInject,
+		},
+		{
+			name: "write new file does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Write", writeInput("/p/brand_new.go", "content1"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Write", writeInput("/p/also_new.go", "content2"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "write after edit triggers",
+			activities: []types.Activity{
+				// Edit establishes file as known.
+				makeActivity("PostToolUse", "Edit", editInput("/p/service.go", "old", "new"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Write", writeInput("/p/service.go", "full rewrite 1"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Write", writeInput("/p/service.go", "full rewrite 2"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+	})
+}
+
+func TestScenarios_TestAssertionWeakening(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "test-assertion-weakening")
+	now := time.Now()
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "removing assert triggers",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo_test.go",
+					"assert.Equal(t, want, got)", "// simplified"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo_test.go",
+					"require.NoError(t, err)", "// removed check"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionBlock,
+		},
+		{
+			name: "adding assert does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo_test.go",
+					"// placeholder", "assert.Equal(t, want, got)"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/foo_test.go",
+					"// placeholder2", "require.NoError(t, err)"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "non-test file does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/handler.go",
+					"assert.Equal(t, want, got)", "// removed"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/handler.go",
+					"require.NoError(t, err)", "// removed"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+func TestScenarios_ErrorHandlingRemoval(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "error-handling-removal")
+	now := time.Now()
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "removing error handling triggers",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/handler.go",
+					"if err != nil { return err }", "// just continue"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/service.go",
+					"if err != nil { log.Fatal(err) }", "// ignore"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionBlock,
+		},
+		{
+			name: "adding error handling does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/handler.go",
+					"result := doSomething()", "if err != nil { return err }"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/service.go",
+					"val := process()", "if err != nil { log.Fatal(err) }"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+func TestScenarios_LargeCodeDeletion(t *testing.T) {
+	rule := findRule(t, loadTestRules(t), "large-code-deletion")
+	now := time.Now()
+	large := strings.Repeat("x", 200)
+	small := strings.Repeat("y", 80) // 80 < 0.5*200 → shrink
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "3x shrink >50% triggers",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/a.go", large, small), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/b.go", large, small), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/c.go", large, small), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch:  1,
+			wantAction: types.ActionInject,
+		},
+		{
+			name: "shrink <50% does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/a.go", large, strings.Repeat("y", 120)), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/b.go", large, strings.Repeat("y", 120)), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/c.go", large, strings.Repeat("y", 120)), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "2x shrink below threshold does not trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", editInput("/p/a.go", large, small), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", editInput("/p/b.go", large, small), now.Add(-1*time.Minute), "s1"),
 			},
 			wantMatch: 0,
 		},

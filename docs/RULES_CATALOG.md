@@ -25,6 +25,7 @@ that stateless hooks cannot see.
 | **CHASH** | Content Hash | Hash file content; detect reversion to previous state |
 | **EHASH** | Edit Hash | Hash edits; detect identical transformations repeated |
 | **CMDHASH** | Command Hash | Hash commands; detect identical failing commands |
+| **FILEREG** | File Registry | Track known file paths; detect Write on already-seen files |
 | **DIFF+CNT** | Diff Pattern + Counter | Regex on edit content, counted over time |
 
 ---
@@ -112,32 +113,107 @@ that stateless hooks cannot see.
 
 ---
 
+### `edit-oscillation` — Code Oscillation (A→B→A)
+
+| Field | Value |
+|-------|-------|
+| **Technique** | CHASH |
+| **Severity** | CRITICAL |
+| **Action** | block (30s cooldown) |
+
+**Trigger:** Edit/Write on same file reverts content to a previously seen state within 10 minutes. Uses FNV-1a content hashing per file.
+
+---
+
+### `repeated-identical-edit` — Same Edit Applied Repeatedly
+
+| Field | Value |
+|-------|-------|
+| **Technique** | EHASH |
+| **Severity** | HIGH |
+| **Action** | block (30s cooldown) |
+
+**Trigger:** The exact same (file_path, old_string, new_string) Edit is applied 3+ times within 5 minutes.
+
+---
+
+### `repeated-failing-command` — Exact Same Command Failing
+
+| Field | Value |
+|-------|-------|
+| **Technique** | CMDHASH |
+| **Severity** | HIGH |
+| **Action** | block (60s cooldown) |
+
+**Trigger:** The exact same Bash command fails (PostToolUseFailure) 3+ times within 3 minutes. Upgrade of `excessive-retry-same-command` with command hash matching.
+
+---
+
+### `whole-file-rewrite` — Write on Known Files
+
+| Field | Value |
+|-------|-------|
+| **Technique** | FILEREG |
+| **Severity** | MEDIUM |
+| **Action** | inject |
+
+**Trigger:** Write tool used on files already seen in Read/Edit activities, 2+ times within 5 minutes.
+
+---
+
+### `test-assertion-weakening` — Removing Test Assertions
+
+| Field | Value |
+|-------|-------|
+| **Technique** | DIFF+CNT |
+| **Severity** | CRITICAL |
+| **Action** | block (30s cooldown) |
+
+**Trigger:** Edit on test files removes assertion patterns (`assert`, `expect`, `require.`, etc.) 2+ times within 5 minutes. Detected when old_string matches pattern but new_string does not.
+
+---
+
+### `error-handling-removal` — Removing Error Handling
+
+| Field | Value |
+|-------|-------|
+| **Technique** | DIFF+CNT |
+| **Severity** | HIGH |
+| **Action** | block (30s cooldown) |
+
+**Trigger:** Edit removes error handling patterns (`if err != nil`, `try {`, `catch (`, etc.) 2+ times within 5 minutes.
+
+---
+
+### `large-code-deletion` — Repeated Large Deletions
+
+| Field | Value |
+|-------|-------|
+| **Technique** | DIFF+CNT |
+| **Severity** | MEDIUM |
+| **Action** | inject |
+
+**Trigger:** Edit reduces code by >50% (`len(new) < 0.5 * len(old)`) 3+ times within 5 minutes.
+
+---
+
 ## Summary
 
 | Rule | Technique | Severity | Action |
 |------|-----------|----------|--------|
 | test-only-modification | CNT+ABS | CRITICAL | block |
+| edit-oscillation | CHASH | CRITICAL | block |
+| test-assertion-weakening | DIFF+CNT | CRITICAL | block |
 | excessive-retry-same-command | CNT | HIGH | block |
-| blind-file-creation | CNT+ABS | MEDIUM | inject |
+| repeated-identical-edit | EHASH | HIGH | block |
+| repeated-failing-command | CMDHASH | HIGH | block |
+| error-handling-removal | DIFF+CNT | HIGH | block |
 | same-file-excessive-edits | CNT | MEDIUM | inject |
+| blind-file-creation | CNT+ABS | MEDIUM | inject |
+| whole-file-rewrite | FILEREG | MEDIUM | inject |
+| large-code-deletion | DIFF+CNT | MEDIUM | inject |
 | write-before-read | CNT+ABS | LOW | inject |
 | session-context-warning | CNT | LOW | inject |
-
----
-
-## Planned Rules
-
-These rules require engine enhancements (hash tracking, diff analysis) not yet implemented.
-
-| Rule | Technique | Description |
-|------|-----------|-------------|
-| `edit-oscillation` | CHASH | Detect A→B→A code oscillation via file content hashing |
-| `repeated-identical-edit` | EHASH | Detect same old→new transformation applied repeatedly |
-| `repeated-failing-command` | CMDHASH | Upgrade `excessive-retry` with exact command hash matching |
-| `test-assertion-weakening` | DIFF+CNT | Detect progressive weakening of test assertions |
-| `error-handling-removal` | DIFF+CNT | Detect progressive removal of error handling code |
-| `whole-file-rewrite` | CHASH+CNT | Detect Write on files that already exist (prefer Edit) |
-| `large-code-deletion` | DIFF+CNT | Detect repeated edits removing significantly more code than they add |
 
 ---
 

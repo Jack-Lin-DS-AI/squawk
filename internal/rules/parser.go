@@ -4,6 +4,7 @@ package rules
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
@@ -48,9 +49,40 @@ func ParseRuleFile(path string) ([]types.Rule, error) {
 		if err := validateDurations(&rf.Rules[i]); err != nil {
 			return nil, fmt.Errorf("rule %q in %q: %w", rf.Rules[i].Name, path, err)
 		}
+		if err := validateConditionFields(&rf.Rules[i]); err != nil {
+			return nil, fmt.Errorf("rule %q in %q: %w", rf.Rules[i].Name, path, err)
+		}
 	}
 
 	return rf.Rules, nil
+}
+
+// validHashModes lists all supported hash_mode values.
+var validHashModes = map[string]bool{
+	"":           true,
+	"content":    true,
+	"edit":       true,
+	"command":    true,
+	"known_file": true,
+}
+
+// validateConditionFields checks that hash_mode, diff_pattern, and
+// diff_shrink_ratio values are valid.
+func validateConditionFields(rule *types.Rule) error {
+	for j, cond := range rule.Trigger.Conditions {
+		if !validHashModes[cond.HashMode] {
+			return fmt.Errorf("condition %d: invalid hash_mode %q", j, cond.HashMode)
+		}
+		if cond.DiffPattern != "" {
+			if _, err := regexp.Compile(cond.DiffPattern); err != nil {
+				return fmt.Errorf("condition %d: invalid diff_pattern %q: %w", j, cond.DiffPattern, err)
+			}
+		}
+		if cond.DiffShrinkRatio != 0 && (cond.DiffShrinkRatio < 0 || cond.DiffShrinkRatio > 1) {
+			return fmt.Errorf("condition %d: diff_shrink_ratio must be between 0 and 1, got %g", j, cond.DiffShrinkRatio)
+		}
+	}
+	return nil
 }
 
 // validateDurations checks that all duration strings in a rule are parseable.

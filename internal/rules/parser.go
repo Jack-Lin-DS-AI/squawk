@@ -52,6 +52,9 @@ func ParseRuleFile(path string) ([]types.Rule, error) {
 		if err := validateConditionFields(&rf.Rules[i]); err != nil {
 			return nil, fmt.Errorf("rule %q in %q: %w", rf.Rules[i].Name, path, err)
 		}
+		if err := compilePatterns(&rf.Rules[i]); err != nil {
+			return nil, fmt.Errorf("rule %q in %q: %w", rf.Rules[i].Name, path, err)
+		}
 	}
 
 	return rf.Rules, nil
@@ -81,6 +84,36 @@ func validateConditionFields(rule *types.Rule) error {
 		if cond.DiffShrinkRatio != 0 && (cond.DiffShrinkRatio < 0 || cond.DiffShrinkRatio > 1) {
 			return fmt.Errorf("condition %d: diff_shrink_ratio must be between 0 and 1, got %g", j, cond.DiffShrinkRatio)
 		}
+	}
+	return nil
+}
+
+// compilePatterns pre-compiles regex patterns in rule conditions and actions
+// so they don't need to be recompiled on every evaluation.
+func compilePatterns(rule *types.Rule) error {
+	for j := range rule.Trigger.Conditions {
+		cond := &rule.Trigger.Conditions[j]
+		if cond.Tool != "" {
+			re, err := regexp.Compile("^(?:" + cond.Tool + ")$")
+			if err != nil {
+				return fmt.Errorf("condition %d: invalid tool regex %q: %w", j, cond.Tool, err)
+			}
+			cond.ToolRe = re
+		}
+		if cond.DiffPattern != "" {
+			re, err := regexp.Compile(cond.DiffPattern)
+			if err != nil {
+				return fmt.Errorf("condition %d: invalid diff_pattern %q: %w", j, cond.DiffPattern, err)
+			}
+			cond.DiffPatternRe = re
+		}
+	}
+	if rule.Action.ToolScope != "" {
+		re, err := regexp.Compile("^(?:" + rule.Action.ToolScope + ")$")
+		if err != nil {
+			return fmt.Errorf("invalid tool_scope regex %q: %w", rule.Action.ToolScope, err)
+		}
+		rule.Action.ToolScopeRe = re
 	}
 	return nil
 }

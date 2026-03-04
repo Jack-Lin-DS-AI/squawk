@@ -5,13 +5,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
 func TestInstallHooks_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("InstallHooks() error: %v", err)
 	}
 
@@ -32,7 +34,7 @@ func TestInstallHooks_ExistingSettings(t *testing.T) {
 	}
 	writeTestSettings(t, path, existing)
 
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("InstallHooks() error: %v", err)
 	}
 
@@ -72,7 +74,7 @@ func TestInstallHooks_ExistingNonSquawkHooks(t *testing.T) {
 	}
 	writeTestSettings(t, path, existing)
 
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("InstallHooks() error: %v", err)
 	}
 
@@ -112,7 +114,7 @@ func TestInstallHooks_UpgradeOldSquawkHooks(t *testing.T) {
 	}
 	writeTestSettings(t, path, existing)
 
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("InstallHooks() error: %v", err)
 	}
 
@@ -138,10 +140,10 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("first InstallHooks() error: %v", err)
 	}
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("second InstallHooks() error: %v", err)
 	}
 
@@ -162,7 +164,7 @@ func TestUninstallHooks(t *testing.T) {
 	path := filepath.Join(dir, "settings.json")
 
 	// Install then uninstall.
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("InstallHooks() error: %v", err)
 	}
 	if err := UninstallHooks(path, 3131); err != nil {
@@ -247,7 +249,7 @@ func TestIsHooksInstalled(t *testing.T) {
 	}
 
 	// Install.
-	if err := InstallHooks(path, 3131); err != nil {
+	if err := InstallHooks(path, 3131, nil); err != nil {
 		t.Fatalf("InstallHooks() error: %v", err)
 	}
 
@@ -338,5 +340,105 @@ func assertSquawkHooksPresent(t *testing.T, settings map[string]any, port int) {
 		if !ok || len(entries) == 0 {
 			t.Errorf("%s hooks not found", eventType)
 		}
+	}
+}
+
+func TestPreToolUseMatcher(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules []types.Rule
+		want  string
+	}{
+		{
+			name:  "no rules returns defaults",
+			rules: nil,
+			want:  "Bash|Edit|Write",
+		},
+		{
+			name: "adds tools from block rules",
+			rules: []types.Rule{
+				{
+					Enabled: true,
+					Trigger: types.Trigger{Conditions: []types.Condition{
+						{Event: "PreToolUse", Tool: "Read|Glob"},
+					}},
+					Action: types.Action{Type: types.ActionBlock},
+				},
+			},
+			want: "Bash|Edit|Glob|Read|Write",
+		},
+		{
+			name: "ignores disabled rules",
+			rules: []types.Rule{
+				{
+					Enabled: false,
+					Trigger: types.Trigger{Conditions: []types.Condition{
+						{Event: "PreToolUse", Tool: "Read"},
+					}},
+					Action: types.Action{Type: types.ActionBlock},
+				},
+			},
+			want: "Bash|Edit|Write",
+		},
+		{
+			name: "ignores non-block actions",
+			rules: []types.Rule{
+				{
+					Enabled: true,
+					Trigger: types.Trigger{Conditions: []types.Condition{
+						{Tool: "Read"},
+					}},
+					Action: types.Action{Type: types.ActionInject},
+				},
+			},
+			want: "Bash|Edit|Write",
+		},
+		{
+			name: "ignores regex metacharacters",
+			rules: []types.Rule{
+				{
+					Enabled: true,
+					Trigger: types.Trigger{Conditions: []types.Condition{
+						{Tool: "Edit|Write.*"},
+					}},
+					Action: types.Action{Type: types.ActionBlock},
+				},
+			},
+			want: "Bash|Edit|Write",
+		},
+		{
+			name: "adds tools from action tool_scope",
+			rules: []types.Rule{
+				{
+					Enabled: true,
+					Trigger: types.Trigger{Conditions: []types.Condition{
+						{Event: "PostToolUse", Tool: "Read"},
+					}},
+					Action: types.Action{Type: types.ActionBlock, ToolScope: "Read|Grep"},
+				},
+			},
+			want: "Bash|Edit|Grep|Read|Write",
+		},
+		{
+			name: "condition with empty event includes tool",
+			rules: []types.Rule{
+				{
+					Enabled: true,
+					Trigger: types.Trigger{Conditions: []types.Condition{
+						{Tool: "Grep"},
+					}},
+					Action: types.Action{Type: types.ActionBlock},
+				},
+			},
+			want: "Bash|Edit|Grep|Write",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PreToolUseMatcher(tt.rules)
+			if got != tt.want {
+				t.Errorf("PreToolUseMatcher() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

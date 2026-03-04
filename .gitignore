@@ -2,14 +2,21 @@
 /squawk
 *.exe
 
-# Squawk runtime (user-specific)
-.squawk/squawk.log
-.squawk/config.yaml
+# Squawk runtime data
+.squawk/
+
+# Build artifacts
+/dist/
+coverage.out
+*.prof
+*.test
 
 # IDE
 .idea/
 .vscode/
 *.swp
+*~
 
 # OS
 .DS_Store
+Thumbs.db

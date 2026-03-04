@@ -1,7 +1,10 @@
 // Package types defines shared types used across all squawk packages.
 package types
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Event represents a Claude Code hook event received by squawk.
 type Event struct {
@@ -42,6 +45,8 @@ type Condition struct {
 	HashMode           string  `yaml:"hash_mode" json:"hash_mode"`                       // "content"|"edit"|"command"|"known_file"|""
 	DiffPattern        string  `yaml:"diff_pattern" json:"diff_pattern"`                  // Regex: present in old_string, absent in new_string → "removal"
 	DiffShrinkRatio    float64 `yaml:"diff_shrink_ratio" json:"diff_shrink_ratio"`        // 0-1: trigger when len(new) < ratio * len(old)
+	ToolRe             *regexp.Regexp `yaml:"-" json:"-"` // compiled from Tool
+	DiffPatternRe      *regexp.Regexp `yaml:"-" json:"-"` // compiled from DiffPattern
 }
 
 // ActionType defines what kind of action to take.
@@ -60,7 +65,8 @@ type Action struct {
 	Message   string     `yaml:"message" json:"message"`       // Message to send (block reason, inject prompt, notification text)
 	ToolScope string     `yaml:"tool_scope" json:"tool_scope"` // Regex: which tools the block applies to (empty = all)
 	FileScope string     `yaml:"file_scope" json:"file_scope"` // Glob: which files the block applies to (empty = all)
-	Cooldown  string     `yaml:"cooldown" json:"cooldown"`     // Duration string: "30s", "1m" — suppress re-triggering within this window
+	Cooldown    string         `yaml:"cooldown" json:"cooldown"`       // Duration string: "30s", "1m" — suppress re-triggering within this window
+	ToolScopeRe *regexp.Regexp `yaml:"-" json:"-"`                    // compiled from ToolScope
 }
 
 // Activity represents a tracked tool usage event for pattern detection.

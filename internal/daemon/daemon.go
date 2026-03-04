@@ -39,7 +39,7 @@ func Acquire(dir string) (*PIDFile, error) {
 	}
 
 	pidPath := filepath.Join(dir, pidFileName)
-	f, err := os.OpenFile(pidPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(pidPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open PID file: %w", err)
 	}
@@ -112,7 +112,7 @@ func ReadPID(dir string) (int, error) {
 // If the lock fails, a daemon holds it. If it succeeds, no daemon is running.
 func IsRunning(dir string) (bool, int, error) {
 	pidPath := filepath.Join(dir, pidFileName)
-	f, err := os.OpenFile(pidPath, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(pidPath, os.O_RDWR, 0o600)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, 0, nil
@@ -154,7 +154,7 @@ func Daemonize(squawkDir string, args []string) (int, error) {
 	}
 
 	logPath := DaemonLogPath(squawkDir)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open daemon log file: %w", err)
 	}

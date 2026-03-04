@@ -63,10 +63,11 @@ func Save(cfg *types.Config, path string) error {
 // using HTTP hooks (preferred). Claude Code POSTs event JSON directly to
 // squawk's endpoints. Connection failures and timeouts are non-blocking,
 // so Claude Code continues if squawk is not running (fail-open).
-func GenerateHooksConfig(port int) (map[string]any, error) {
+func GenerateHooksConfig(port int, rules []types.Rule) (map[string]any, error) {
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("invalid port number: %d", port)
 	}
-	return map[string]any{"hooks": buildSquawkHooks(port)}, nil
+	matcher := PreToolUseMatcher(rules)
+	return map[string]any{"hooks": buildSquawkHooks(port, matcher)}, nil
 }
 

@@ -1,3 +1,5 @@
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+
 .DEFAULT_GOAL := all
 
 .PHONY: all build test cover lint fmt install clean
@@ -5,13 +7,14 @@
 all: fmt lint test build
 
 build:
-	go build -o squawk ./cmd/squawk
+	go build -ldflags "-X main.version=$(VERSION)" -o squawk ./cmd/squawk
 
 test:
 	go test -race ./...
 
 cover:
-	go test -cover ./...
+	go test -coverprofile=coverage.out ./...
+	@go tool cover -func=coverage.out | tail -1
 
 lint:
 	go vet ./...
@@ -22,7 +25,7 @@ fmt:
 	@which goimports > /dev/null 2>&1 && goimports -w . || true
 
 install:
-	go install ./cmd/squawk
+	go install -ldflags "-X main.version=$(VERSION)" ./cmd/squawk
 
 clean:
-	rm -f squawk
+	rm -f squawk coverage.out

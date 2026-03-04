@@ -126,16 +126,8 @@ func evaluateCondition(cond types.Condition, activities, allActivities []types.A
 		cutoff = currentEvent.Timestamp.Add(-window)
 	}
 
-	// Build a regex for the tool name if specified.
-	var toolRe *regexp.Regexp
-	if cond.Tool != "" {
-		var err error
-		toolRe, err = regexp.Compile("^(?:" + cond.Tool + ")$")
-		if err != nil {
-			// Invalid regex — condition cannot match.
-			return nil, false
-		}
-	}
+	// Use pre-compiled regex for tool name matching.
+	toolRe := cond.ToolRe
 
 	// Collect activities that match this condition's basic criteria.
 	var matched []types.Activity
@@ -152,8 +144,8 @@ func evaluateCondition(cond types.Condition, activities, allActivities []types.A
 	}
 
 	// Apply diff filter if diff_pattern or diff_shrink_ratio is set.
-	if cond.DiffPattern != "" || cond.DiffShrinkRatio != 0 {
-		matched = diffFilterActivities(cond.DiffPattern, cond.DiffShrinkRatio, matched)
+	if cond.DiffPatternRe != nil || cond.DiffShrinkRatio != 0 {
+		matched = diffFilterActivities(cond.DiffPatternRe, cond.DiffShrinkRatio, matched)
 	}
 
 	requiredCount := cond.Count
@@ -398,19 +390,10 @@ func commandHash(act types.Activity) uint64 {
 // --- Diff filter helpers ---
 
 // diffFilterActivities filters Edit activities based on diff analysis.
-// If pattern is set, keeps activities where old_string matches the regex
+// If patternRe is set, keeps activities where old_string matches the regex
 // but new_string does not (pattern removal). If shrinkRatio > 0, keeps
 // activities where len(new_string) < ratio * len(old_string).
-func diffFilterActivities(pattern string, shrinkRatio float64, activities []types.Activity) []types.Activity {
-	var patternRe *regexp.Regexp
-	if pattern != "" {
-		var err error
-		patternRe, err = regexp.Compile(pattern)
-		if err != nil {
-			return nil
-		}
-	}
-
+func diffFilterActivities(patternRe *regexp.Regexp, shrinkRatio float64, activities []types.Activity) []types.Activity {
 	var result []types.Activity
 	for _, act := range activities {
 		oldStr, _ := act.Event.ToolInput["old_string"].(string)

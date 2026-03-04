@@ -9,6 +9,11 @@ import (
 	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
+const (
+	maxSessions             = 1000
+	maxActivitiesPerSession = 500
+)
+
 // Tracker maintains a sliding window of recent activities per session.
 // It is safe for concurrent use.
 type Tracker struct {
@@ -37,6 +42,11 @@ func (t *Tracker) Record(event types.Event) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Cap total sessions: if at limit, evict oldest session.
+	if _, exists := t.sessions[event.SessionID]; !exists && len(t.sessions) >= maxSessions {
+		t.evictOldestLocked()
+	}
 
 	t.sessions[event.SessionID] = append(t.sessions[event.SessionID], activity)
 	t.cleanupLocked(event.SessionID)
@@ -72,8 +82,28 @@ func (t *Tracker) SessionCounts() map[string]int {
 	return counts
 }
 
-// cleanupLocked removes activities older than the window for a given session.
-// Must be called with t.mu held for writing.
+// evictOldestLocked removes the session whose most recent activity is the
+// oldest across all sessions. Must be called with t.mu held for writing.
+func (t *Tracker) evictOldestLocked() {
+	var oldestSID string
+	var oldestTime time.Time
+	for sid, acts := range t.sessions {
+		if len(acts) > 0 {
+			last := acts[len(acts)-1].Timestamp
+			if oldestSID == "" || last.Before(oldestTime) {
+				oldestSID = sid
+				oldestTime = last
+			}
+		}
+	}
+	if oldestSID != "" {
+		delete(t.sessions, oldestSID)
+	}
+}
+
+// cleanupLocked removes activities older than the window for a given session
+// and enforces the per-session activity cap. Must be called with t.mu held
+// for writing.
 func (t *Tracker) cleanupLocked(sessionID string) {
 	activities := t.sessions[sessionID]
 	cutoff := time.Now().Add(-t.windowSize)
@@ -93,6 +123,15 @@ func (t *Tracker) cleanupLocked(sessionID string) {
 		return
 	}
 	if firstValid > 0 {
-		t.sessions[sessionID] = activities[firstValid:]
+		// Copy to new slice to release underlying array memory.
+		trimmed := make([]types.Activity, len(activities)-firstValid)
+		copy(trimmed, activities[firstValid:])
+		activities = trimmed
 	}
+
+	// Cap per-session activities.
+	if len(activities) > maxActivitiesPerSession {
+		activities = activities[len(activities)-maxActivitiesPerSession:]
+	}
+	t.sessions[sessionID] = activities
 }

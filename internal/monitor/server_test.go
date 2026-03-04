@@ -56,7 +56,7 @@ func startTestServer(t *testing.T, evaluator RuleEvaluator, executors ...ActionE
 	if len(executors) > 0 {
 		exec = executors[0]
 	}
-	srv := NewServer(":0", "", tracker, evaluator, exec)
+	srv := NewServer(":0", "", tracker, evaluator, exec, "")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, tracker
@@ -380,7 +380,7 @@ func startReloadTestServer(t *testing.T, rulesDir string) (*httptest.Server, *mo
 	t.Helper()
 	eval := &mockEvaluator{}
 	tracker := NewTracker(10 * time.Minute)
-	srv := NewServer(":0", rulesDir, tracker, eval, nil)
+	srv := NewServer(":0", rulesDir, tracker, eval, nil, "")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, eval
@@ -450,6 +450,172 @@ func TestReloadRules(t *testing.T) {
 	})
 }
 
+// --- Admin Auth Tests ---
+
+func startAuthTestServer(t *testing.T, rulesDir, token string) *httptest.Server {
+	t.Helper()
+	eval := &mockEvaluator{}
+	tracker := NewTracker(10 * time.Minute)
+	srv := NewServer(":0", rulesDir, tracker, eval, nil, token)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestAdminAuth(t *testing.T) {
+	t.Run("returns 401 without token", func(t *testing.T) {
+		dir := t.TempDir()
+		ts := startAuthTestServer(t, dir, "secret-token-123")
+
+		resp, err := ts.Client().Post(ts.URL+"/admin/reload-rules", "", nil)
+		if err != nil {
+			t.Fatalf("POST /admin/reload-rules failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		}
+		body := decodeJSON[map[string]string](t, resp)
+		if body["error"] != "unauthorized" {
+			t.Errorf("error = %q, want %q", body["error"], "unauthorized")
+		}
+	})
+
+	t.Run("returns 401 with wrong token", func(t *testing.T) {
+		dir := t.TempDir()
+		ts := startAuthTestServer(t, dir, "secret-token-123")
+
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/reload-rules", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer wrong-token")
+
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("succeeds with correct token", func(t *testing.T) {
+		dir := t.TempDir()
+		ruleYAML := `rules:
+  - name: auth-test-rule
+    enabled: true
+    trigger:
+      conditions:
+        - event: PostToolUse
+          count: 1
+    action:
+      type: log
+      message: test
+`
+		if err := os.WriteFile(dir+"/rule.yaml", []byte(ruleYAML), 0o644); err != nil {
+			t.Fatalf("failed to write rule file: %v", err)
+		}
+
+		token := "secret-token-123"
+		ts := startAuthTestServer(t, dir, token)
+
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/reload-rules", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("no token configured allows unauthenticated access", func(t *testing.T) {
+		dir := t.TempDir()
+		ruleYAML := `rules:
+  - name: noauth-rule
+    enabled: true
+    trigger:
+      conditions:
+        - event: PostToolUse
+          count: 1
+    action:
+      type: log
+      message: test
+`
+		if err := os.WriteFile(dir+"/rule.yaml", []byte(ruleYAML), 0o644); err != nil {
+			t.Fatalf("failed to write rule file: %v", err)
+		}
+
+		ts := startAuthTestServer(t, dir, "")
+
+		resp, err := ts.Client().Post(ts.URL+"/admin/reload-rules", "", nil)
+		if err != nil {
+			t.Fatalf("POST /admin/reload-rules failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d (backward compat)", resp.StatusCode, http.StatusOK)
+		}
+	})
+}
+
+// --- Admin Token File Tests ---
+
+func TestAdminTokenFile(t *testing.T) {
+	t.Run("generate and read round-trip", func(t *testing.T) {
+		dir := t.TempDir()
+		token, err := GenerateAdminToken(dir)
+		if err != nil {
+			t.Fatalf("GenerateAdminToken failed: %v", err)
+		}
+		if len(token) != 64 { // 32 bytes = 64 hex chars
+			t.Errorf("token length = %d, want 64", len(token))
+		}
+
+		got := ReadAdminToken(dir)
+		if got != token {
+			t.Errorf("ReadAdminToken = %q, want %q", got, token)
+		}
+	})
+
+	t.Run("read returns empty for missing file", func(t *testing.T) {
+		dir := t.TempDir()
+		got := ReadAdminToken(dir)
+		if got != "" {
+			t.Errorf("ReadAdminToken = %q, want empty string", got)
+		}
+	})
+
+	t.Run("generate creates file with restricted permissions", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := GenerateAdminToken(dir)
+		if err != nil {
+			t.Fatalf("GenerateAdminToken failed: %v", err)
+		}
+
+		info, err := os.Stat(dir + "/admin.token")
+		if err != nil {
+			t.Fatalf("stat admin.token: %v", err)
+		}
+		perm := info.Mode().Perm()
+		if perm != 0o600 {
+			t.Errorf("file permissions = %o, want 600", perm)
+		}
+	})
+}
+
 // --- Tracker Tests ---
 
 func TestTracker(t *testing.T) {
@@ -494,6 +660,158 @@ func TestTracker(t *testing.T) {
 		activities := tracker.GetActivities("s1")
 		if len(activities) != 1 {
 			t.Fatalf("count = %d, want 1 (old should be cleaned)", len(activities))
+		}
+	})
+}
+
+// --- Tracker Resource Cap Tests ---
+
+func TestTrackerSessionEviction(t *testing.T) {
+	t.Run("evicts oldest session when at maxSessions", func(t *testing.T) {
+		tracker := NewTracker(1 * time.Hour)
+		now := time.Now()
+
+		// Fill up to maxSessions with sessions whose last activity timestamp
+		// increases with session index, so session "s-0" is the oldest.
+		for i := 0; i < maxSessions; i++ {
+			event := types.Event{
+				SessionID: fmt.Sprintf("s-%d", i),
+				Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+			}
+			tracker.Record(event)
+		}
+
+		counts := tracker.SessionCounts()
+		if len(counts) != maxSessions {
+			t.Fatalf("session count = %d, want %d", len(counts), maxSessions)
+		}
+
+		// Record a new session beyond the limit.
+		newEvent := types.Event{
+			SessionID: "s-new",
+			Timestamp: now.Add(time.Duration(maxSessions) * time.Millisecond),
+		}
+		tracker.Record(newEvent)
+
+		counts = tracker.SessionCounts()
+		if len(counts) != maxSessions {
+			t.Fatalf("session count after eviction = %d, want %d", len(counts), maxSessions)
+		}
+
+		// The oldest session (s-0) should have been evicted.
+		if _, exists := counts["s-0"]; exists {
+			t.Error("expected s-0 to be evicted")
+		}
+
+		// The new session should exist.
+		if _, exists := counts["s-new"]; !exists {
+			t.Error("expected s-new to exist")
+		}
+	})
+
+	t.Run("does not evict when existing session records", func(t *testing.T) {
+		tracker := NewTracker(1 * time.Hour)
+		now := time.Now()
+
+		// Fill to maxSessions.
+		for i := 0; i < maxSessions; i++ {
+			event := types.Event{
+				SessionID: fmt.Sprintf("s-%d", i),
+				Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+			}
+			tracker.Record(event)
+		}
+
+		// Record another event to an existing session — should not evict.
+		existingEvent := types.Event{
+			SessionID: "s-0",
+			Timestamp: now.Add(time.Duration(maxSessions) * time.Millisecond),
+		}
+		tracker.Record(existingEvent)
+
+		counts := tracker.SessionCounts()
+		if len(counts) != maxSessions {
+			t.Fatalf("session count = %d, want %d", len(counts), maxSessions)
+		}
+		if counts["s-0"] != 2 {
+			t.Errorf("s-0 count = %d, want 2", counts["s-0"])
+		}
+	})
+}
+
+func TestTrackerPerSessionCap(t *testing.T) {
+	t.Run("caps activities per session", func(t *testing.T) {
+		tracker := NewTracker(1 * time.Hour)
+		now := time.Now()
+
+		// Record more activities than the cap.
+		for i := 0; i < maxActivitiesPerSession+100; i++ {
+			event := types.Event{
+				SessionID: "s1",
+				ToolName:  fmt.Sprintf("tool-%d", i),
+				Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+			}
+			tracker.Record(event)
+		}
+
+		activities := tracker.GetActivities("s1")
+		if len(activities) > maxActivitiesPerSession {
+			t.Fatalf("activity count = %d, want <= %d", len(activities), maxActivitiesPerSession)
+		}
+
+		// The most recent activities should be preserved (last N).
+		last := activities[len(activities)-1]
+		expectedTool := fmt.Sprintf("tool-%d", maxActivitiesPerSession+100-1)
+		if last.Event.ToolName != expectedTool {
+			t.Errorf("last activity tool = %q, want %q", last.Event.ToolName, expectedTool)
+		}
+	})
+}
+
+func TestTrackerCleanupCopiesSlice(t *testing.T) {
+	t.Run("trimmed slice is copied to new backing array", func(t *testing.T) {
+		tracker := NewTracker(5 * time.Minute)
+		now := time.Now()
+
+		// Directly inject activities into the tracker: some old, some recent.
+		// This bypasses Record to set up a specific internal state where
+		// cleanup will find old entries to trim.
+		tracker.mu.Lock()
+		tracker.sessions["s1"] = []types.Activity{
+			{Event: types.Event{SessionID: "s1", ToolName: "old-1"}, Timestamp: now.Add(-10 * time.Minute)},
+			{Event: types.Event{SessionID: "s1", ToolName: "old-2"}, Timestamp: now.Add(-9 * time.Minute)},
+			{Event: types.Event{SessionID: "s1", ToolName: "old-3"}, Timestamp: now.Add(-8 * time.Minute)},
+			{Event: types.Event{SessionID: "s1", ToolName: "recent-1"}, Timestamp: now.Add(-1 * time.Minute)},
+		}
+		origCap := cap(tracker.sessions["s1"])
+		tracker.mu.Unlock()
+
+		// Record a new event, which triggers cleanup.
+		tracker.Record(types.Event{
+			SessionID: "s1",
+			ToolName:  "recent-2",
+			Timestamp: now,
+		})
+
+		tracker.mu.RLock()
+		activities := tracker.sessions["s1"]
+		gotCap := cap(activities)
+		tracker.mu.RUnlock()
+
+		if len(activities) != 2 {
+			t.Fatalf("activity count = %d, want 2", len(activities))
+		}
+		// The new slice should have been copied (cap == len), not a sub-slice
+		// of the original (which would have cap >= origCap).
+		if gotCap >= origCap {
+			t.Errorf("cap = %d (original %d), want smaller than original (slice should be copied)",
+				gotCap, origCap)
+		}
+		if activities[0].Event.ToolName != "recent-1" {
+			t.Errorf("first activity = %q, want %q", activities[0].Event.ToolName, "recent-1")
+		}
+		if activities[1].Event.ToolName != "recent-2" {
+			t.Errorf("second activity = %q, want %q", activities[1].Event.ToolName, "recent-2")
 		}
 	})
 }

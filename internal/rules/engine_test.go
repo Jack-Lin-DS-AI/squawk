@@ -3,6 +3,7 @@ package rules
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,26 @@ func nActivities(n int, event, tool string, input map[string]any, spacing time.D
 	return acts
 }
 
+// compileTestRule pre-compiles regex patterns on a rule, mirroring what
+// ParseRuleFile does at load time. Tests construct rules directly and must
+// call this to populate the compiled fields.
+func compileTestRule(r *types.Rule) {
+	for j := range r.Trigger.Conditions {
+		c := &r.Trigger.Conditions[j]
+		if c.Tool != "" {
+			c.ToolRe = regexp.MustCompile("^(?:" + c.Tool + ")$")
+		}
+		if c.DiffPattern != "" {
+			c.DiffPatternRe = regexp.MustCompile(c.DiffPattern)
+		}
+	}
+	if r.Action.ToolScope != "" {
+		r.Action.ToolScopeRe = regexp.MustCompile("^(?:" + r.Action.ToolScope + ")$")
+	}
+}
+
 // makeRule creates an enabled rule with "and" logic and ActionLog default.
+// It also compiles any regex patterns so the rule is ready for evaluation.
 func makeRule(name string, conds []types.Condition, opts ...func(*types.Rule)) types.Rule {
 	r := types.Rule{
 		Name:    name,
@@ -63,6 +83,7 @@ func makeRule(name string, conds []types.Condition, opts ...func(*types.Rule)) t
 	for _, opt := range opts {
 		opt(&r)
 	}
+	compileTestRule(&r)
 	return r
 }
 
@@ -578,7 +599,7 @@ func TestEvaluateFilePatternExclude(t *testing.T) {
 // --- Scenario Tests: test-only-modification ---
 
 func newTestOnlyModificationRule() types.Rule {
-	return types.Rule{
+	r := types.Rule{
 		Name:     "test-only-modification",
 		Enabled:  true,
 		Priority: 10,
@@ -614,6 +635,8 @@ func newTestOnlyModificationRule() types.Rule {
 			Message: "Stop modifying tests blindly.",
 		},
 	}
+	compileTestRule(&r)
+	return r
 }
 
 func TestScenarios_TestOnlyModification(t *testing.T) {
@@ -1156,7 +1179,7 @@ func TestDiffFilterActivities_PatternMatch(t *testing.T) {
 		// old has assert, new also has assert → no removal
 		makeActivity("PostToolUse", "Edit", editInput("/p/bar_test.go", "assert.Equal(t, 1, 1)", "assert.Equal(t, 2, 2)"), now, "s1"),
 	}
-	result := diffFilterActivities("assert", 0, acts)
+	result := diffFilterActivities(regexp.MustCompile("assert"), 0, acts)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result))
 	}
@@ -1175,7 +1198,9 @@ func TestDiffFilterActivities_ShrinkRatio(t *testing.T) {
 		makeActivity("PostToolUse", "Edit", editInput("/p/baz.go",
 			"", strings.Repeat("y", 10)), now, "s1"),
 	}
-	result := diffFilterActivities("", 0.5, acts)
+	// Pass nil for patternRe since we only test shrink ratio here (no regex pattern).
+	var noPattern *regexp.Regexp
+	result := diffFilterActivities(noPattern, 0.5, acts)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result))
 	}

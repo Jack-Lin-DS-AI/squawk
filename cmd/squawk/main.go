@@ -30,8 +30,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var version = "dev" // injected at build time via -ldflags
+
 const (
-	version    = "0.1.0"
 	configPath = ".squawk/config.yaml"
 
 	httpClientTimeout   = 2 * time.Second
@@ -100,7 +101,7 @@ func newInitCmd() *cobra.Command {
 			fmt.Println("Created .squawk/config.yaml with default settings.")
 
 			// Generate and print hooks config.
-			hooks, err := config.GenerateHooksConfig(cfg.Server.Port)
+			hooks, err := config.GenerateHooksConfig(cfg.Server.Port, nil)
 			if err != nil {
 				return fmt.Errorf("failed to generate hooks config: %w", err)
 			}
@@ -187,7 +188,13 @@ func newWatchCmd() *cobra.Command {
 
 			// Create and configure the HTTP server.
 			addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-			srv := monitor.NewServer(addr, cfg.RulesDir, tracker, engine, executor)
+			// Generate admin token for this daemon session.
+			adminToken, err := monitor.GenerateAdminToken(sdir)
+			if err != nil {
+				log.Printf("Warning: failed to generate admin token: %v", err)
+			}
+
+			srv := monitor.NewServer(addr, cfg.RulesDir, tracker, engine, executor, adminToken)
 
 			// Bind port before logging start to avoid spurious entries on failure.
 			listener, err := net.Listen("tcp", addr)
@@ -598,7 +605,9 @@ func newSetupCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to determine settings path: %w", err)
 			}
-			if err := config.InstallHooks(settingsPath, cfg.Server.Port); err != nil {
+			// Load rules for dynamic PreToolUse matcher computation.
+			setupRules, _ := rules.LoadRules(cfg.RulesDir)
+			if err := config.InstallHooks(settingsPath, cfg.Server.Port, setupRules); err != nil {
 				return fmt.Errorf("failed to install hooks: %w", err)
 			}
 			fmt.Printf("Installed hooks into %s\n", settingsPath)
@@ -745,7 +754,7 @@ func newRulesToggleCmd(verb string, fn func(string, string) (string, error)) *co
 			}
 			fmt.Printf("%sd rule %q in %s\n", titled, args[0], path)
 
-			triggerReload(cfg.Server.Port)
+			triggerReload(cfg.Server.Port, squawkDir(cfg))
 			return nil
 		},
 	}
@@ -780,7 +789,7 @@ func newRulesRemoveCmd() *cobra.Command {
 				fmt.Printf("Removed rule %q from %s (%d rules remaining)\n", args[0], path, remaining)
 			}
 
-			triggerReload(cfg.Server.Port)
+			triggerReload(cfg.Server.Port, squawkDir(cfg))
 			return nil
 		},
 	}
@@ -790,11 +799,23 @@ func newRulesRemoveCmd() *cobra.Command {
 }
 
 // triggerReload sends a reload request to the running server. Fails silently
-// if the server is not running (fail-open).
-func triggerReload(port int) {
+// if the server is not running (fail-open). It reads the admin token from the
+// squawk directory to authenticate with the admin endpoint.
+func triggerReload(port int, sdir string) {
 	url := adminURL(port, "/admin/reload-rules")
 	client := &http.Client{Timeout: httpClientTimeout}
-	resp, err := client.Post(url, "application/json", nil)
+
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if token := monitor.ReadAdminToken(sdir); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		// Server not running — that's fine, rules will be picked up on next start.
 		return

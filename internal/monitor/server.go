@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -31,26 +30,29 @@ type ActionExecutor interface {
 // Server is an HTTP server that receives Claude Code hook events, tracks
 // activities, and evaluates supervision rules.
 type Server struct {
-	addr      string
-	rulesDir  string
-	tracker   *Tracker
-	evaluator RuleEvaluator
-	executor  ActionExecutor
-	mux       *http.ServeMux
+	addr       string
+	rulesDir   string
+	tracker    *Tracker
+	evaluator  RuleEvaluator
+	executor   ActionExecutor
+	adminToken string // shared secret for admin endpoints
+	mux        *http.ServeMux
 }
 
 // NewServer creates a new hook server bound to the given address. The executor
 // is optional; when nil the server falls back to built-in behavior (log-only
 // for PostToolUse, inline block for PreToolUse). The rulesDir is used for
-// hot-reloading rules via the admin API.
-func NewServer(addr, rulesDir string, tracker *Tracker, evaluator RuleEvaluator, executor ActionExecutor) *Server {
+// hot-reloading rules via the admin API. The adminToken, when non-empty,
+// requires Bearer token authentication on admin endpoints.
+func NewServer(addr, rulesDir string, tracker *Tracker, evaluator RuleEvaluator, executor ActionExecutor, adminToken string) *Server {
 	s := &Server{
-		addr:      addr,
-		rulesDir:  rulesDir,
-		tracker:   tracker,
-		evaluator: evaluator,
-		executor:  executor,
-		mux:       http.NewServeMux(),
+		addr:       addr,
+		rulesDir:   rulesDir,
+		tracker:    tracker,
+		evaluator:  evaluator,
+		executor:   executor,
+		adminToken: adminToken,
+		mux:        http.NewServeMux(),
 	}
 	s.registerRoutes()
 	return s
@@ -205,10 +207,9 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 // eventInScope checks whether the current PreToolUse event falls within the
 // block action's scope. If no scope is defined, all events are in scope.
 func eventInScope(event types.Event, action types.Action) bool {
-	// Check tool scope.
-	if action.ToolScope != "" {
-		re, err := regexp.Compile("^(?:" + action.ToolScope + ")$")
-		if err != nil || !re.MatchString(event.ToolName) {
+	// Check tool scope using pre-compiled regex.
+	if action.ToolScopeRe != nil {
+		if !action.ToolScopeRe.MatchString(event.ToolName) {
 			return false
 		}
 	}
@@ -236,7 +237,17 @@ func eventInScope(event types.Event, action types.Action) bool {
 }
 
 // handleReloadRules reloads rules from disk and replaces them in the engine.
-func (s *Server) handleReloadRules(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleReloadRules(w http.ResponseWriter, r *http.Request) {
+	if s.adminToken != "" {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+s.adminToken {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "unauthorized",
+			})
+			return
+		}
+	}
+
 	if s.rulesDir == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "rules directory not configured",

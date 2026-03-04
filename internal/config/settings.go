@@ -7,7 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
 // SettingsPath returns the path to Claude Code's settings.json.
@@ -28,14 +31,15 @@ func SettingsPath() (string, error) {
 // back. Existing squawk hooks (identified by URL containing localhost:<port>)
 // are replaced. All other content is preserved. The file is created if it does
 // not exist. Writes are atomic via temp file + rename.
-func InstallHooks(settingsPath string, port int) error {
+func InstallHooks(settingsPath string, port int, rules []types.Rule) error {
 	settings, err := readSettings(settingsPath)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 
 	hooks := ensureHooksMap(settings)
-	squawkHooks := buildSquawkHooks(port)
+	matcher := PreToolUseMatcher(rules)
+	squawkHooks := buildSquawkHooks(port, matcher)
 
 	for eventType, newEntries := range squawkHooks {
 		existing := getHookEntries(hooks, eventType)
@@ -255,7 +259,7 @@ func isSquawkHook(entry any, port int) bool {
 }
 
 // buildSquawkHooks returns the squawk hook entries keyed by event type.
-func buildSquawkHooks(port int) map[string][]any {
+func buildSquawkHooks(port int, preToolMatcher string) map[string][]any {
 	baseURL := fmt.Sprintf("http://localhost:%d", port)
 
 	makeEntry := func(matcher, endpoint string) any {
@@ -272,8 +276,61 @@ func buildSquawkHooks(port int) map[string][]any {
 	}
 
 	return map[string][]any{
-		"PreToolUse":         {makeEntry("Edit|Write|Bash", "/hooks/pre-tool-use")},
+		"PreToolUse":         {makeEntry(preToolMatcher, "/hooks/pre-tool-use")},
 		"PostToolUse":        {makeEntry("", "/hooks/post-tool-use")},
 		"PostToolUseFailure": {makeEntry("", "/hooks/post-tool-use")},
 	}
+}
+
+// PreToolUseMatcher computes the PreToolUse hook matcher from loaded rules.
+// It collects all tool patterns from conditions that target PreToolUse events,
+// plus a default set of tools that should always be monitored. Returns a
+// pipe-separated pattern string suitable for the Claude Code hooks matcher.
+func PreToolUseMatcher(rules []types.Rule) string {
+	tools := map[string]bool{
+		"Edit":  true,
+		"Write": true,
+		"Bash":  true,
+	}
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		// Only look at block actions, since only PreToolUse can block.
+		if r.Action.Type != types.ActionBlock {
+			continue
+		}
+		for _, c := range r.Trigger.Conditions {
+			if c.Event != "" && c.Event != "PreToolUse" {
+				continue
+			}
+			if c.Tool != "" {
+				// Split tool regex on | to extract individual tool names.
+				// Only add simple names (no regex metacharacters).
+				for _, t := range strings.Split(c.Tool, "|") {
+					t = strings.TrimSpace(t)
+					if t != "" && !strings.ContainsAny(t, ".*+?()[]{}^$\\") {
+						tools[t] = true
+					}
+				}
+			}
+		}
+		// Also check tool_scope on the action itself.
+		if r.Action.ToolScope != "" {
+			for _, t := range strings.Split(r.Action.ToolScope, "|") {
+				t = strings.TrimSpace(t)
+				if t != "" && !strings.ContainsAny(t, ".*+?()[]{}^$\\") {
+					tools[t] = true
+				}
+			}
+		}
+	}
+
+	// Sort for deterministic output.
+	sorted := make([]string, 0, len(tools))
+	for t := range tools {
+		sorted = append(sorted, t)
+	}
+	sort.Strings(sorted)
+	return strings.Join(sorted, "|")
 }

@@ -142,7 +142,7 @@ func TestLoadPartialConfig(t *testing.T) {
 }
 
 func TestGenerateHooksConfig(t *testing.T) {
-	hooks, err := GenerateHooksConfig(3131)
+	hooks, err := GenerateHooksConfig(3131, nil)
 	if err != nil {
 		t.Fatalf("GenerateHooksConfig() error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestGenerateHooksConfig(t *testing.T) {
 		}
 	}
 
-	// Verify PreToolUse has the correct matcher and URL.
+	// Verify PreToolUse has the correct default matcher and URL.
 	preEntries := hooksMap["PreToolUse"]
 	if len(preEntries) == 0 {
 		t.Fatal("expected PreToolUse to be non-empty")
@@ -167,8 +167,8 @@ func TestGenerateHooksConfig(t *testing.T) {
 	if !ok {
 		t.Fatal("expected PreToolUse entry to be map[string]any")
 	}
-	if matcher, _ := pre["matcher"].(string); matcher != "Edit|Write|Bash" {
-		t.Errorf("PreToolUse matcher: got %q, want %q", matcher, "Edit|Write|Bash")
+	if matcher, _ := pre["matcher"].(string); matcher != "Bash|Edit|Write" {
+		t.Errorf("PreToolUse matcher: got %q, want %q", matcher, "Bash|Edit|Write")
 	}
 	preInner, ok := pre["hooks"].([]any)
 	if !ok || len(preInner) == 0 {
@@ -210,7 +210,7 @@ func TestGenerateHooksConfigInvalidPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := GenerateHooksConfig(tt.port)
+			_, err := GenerateHooksConfig(tt.port, nil)
 			if err == nil {
 				t.Errorf("expected error for port %d", tt.port)
 			}
@@ -219,7 +219,7 @@ func TestGenerateHooksConfigInvalidPort(t *testing.T) {
 }
 
 func TestGenerateHooksConfigCustomPort(t *testing.T) {
-	hooks, err := GenerateHooksConfig(8080)
+	hooks, err := GenerateHooksConfig(8080, nil)
 	if err != nil {
 		t.Fatalf("GenerateHooksConfig() error: %v", err)
 	}

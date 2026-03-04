@@ -36,7 +36,7 @@ type ActionLogger struct {
 // NewActionLogger creates an ActionLogger that appends to the given file path.
 // The file is created if it does not exist.
 func NewActionLogger(logFile string) (*ActionLogger, error) {
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open action log file %q: %w", logFile, err)
 	}
@@ -181,11 +181,33 @@ func (l *ActionLogger) Close() error {
 	return l.file.Close()
 }
 
+const maxLogSize = 10 * 1024 * 1024 // 10 MB
+
 // write appends a single LogEntry as a JSON line to the log file.
 func (l *ActionLogger) write(entry LogEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// Check if rotation is needed.
+	if info, err := l.file.Stat(); err == nil && info.Size() > maxLogSize {
+		l.rotateLocked()
+	}
+
 	if err := l.encoder.Encode(entry); err != nil {
 		log.Printf("squawk: failed to write action log entry: %v", err)
 	}
+}
+
+func (l *ActionLogger) rotateLocked() {
+	rotatedPath := l.logFile + ".1"
+	l.file.Close()
+	os.Rename(l.logFile, rotatedPath)
+	f, err := os.OpenFile(l.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		log.Printf("squawk: failed to rotate log file: %v", err)
+		// Try to reopen original
+		f, _ = os.OpenFile(l.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	}
+	l.file = f
+	l.encoder = json.NewEncoder(f)
 }

@@ -97,8 +97,11 @@ func sendNotification(title, message string) {
 	if runtime.GOOS != "darwin" {
 		return
 	}
-	script := fmt.Sprintf(`display notification %q with title %q`, message, title)
-	_ = exec.Command("osascript", "-e", script).Run()
+	_ = exec.Command("osascript", "-e",
+		`on run argv
+			display notification (item 1 of argv) with title (item 2 of argv)
+		end run`,
+		"--", message, title).Run()
 }
 
 // LoggingExecutor wraps an Executor and an ActionLogger so that every executed

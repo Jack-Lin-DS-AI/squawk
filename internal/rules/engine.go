@@ -1,8 +1,10 @@
 package rules
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +15,7 @@ import (
 // Engine evaluates loaded rules against activity history and current events.
 type Engine struct {
 	rules     []types.Rule
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	cooldowns map[string]time.Time // rule name → cooldown expiry
 }
 
@@ -25,9 +27,14 @@ func NewEngine(rules []types.Rule) *Engine {
 	}
 }
 
-// Rules returns the engine's loaded rules.
-func (e *Engine) Rules() []types.Rule {
-	return e.rules
+// ReplaceRules atomically replaces the engine's loaded rules, used for
+// hot-reload after rule mutations. All cooldowns are cleared because rule
+// identities may have changed; in-progress cooldowns will not survive a reload.
+func (e *Engine) ReplaceRules(newRules []types.Rule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = newRules
+	e.cooldowns = make(map[string]time.Time)
 }
 
 // Evaluate checks all enabled rules against the activity history and current
@@ -61,14 +68,10 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 		}
 	}
 
-	logic := rule.Trigger.Logic
-	if logic == "" {
-		logic = "and"
-	}
-
 	var allMatched []types.Activity
 
-	switch logic {
+	// Logic default ("and") is applied by ParseRuleFile at load time.
+	switch rule.Trigger.Logic {
 	case "or":
 		for _, cond := range rule.Trigger.Conditions {
 			matched, ok := evaluateCondition(cond, activities, currentEvent)
@@ -124,8 +127,12 @@ func evaluateCondition(cond types.Condition, activities []types.Activity, curren
 	// Build a regex for the tool name if specified.
 	var toolRe *regexp.Regexp
 	if cond.Tool != "" {
-		// Compile the tool pattern; anchor it for full-match semantics.
-		toolRe, _ = regexp.Compile("^(?:" + cond.Tool + ")$")
+		var err error
+		toolRe, err = regexp.Compile("^(?:" + cond.Tool + ")$")
+		if err != nil {
+			// Invalid regex — condition cannot match.
+			return nil, false
+		}
 	}
 
 	// Collect activities that match this condition's basic criteria.
@@ -215,19 +222,23 @@ func matchFilePattern(pattern, filePath string) bool {
 	return false
 }
 
-// appendUnique appends activities from src to dst, skipping duplicates
-// (compared by timestamp and session ID).
+// activityKey returns a unique key for deduplication. Uses a delimiter and
+// UnixNano to avoid collisions from string concatenation.
+func activityKey(a types.Activity) string {
+	return fmt.Sprintf("%s|%d", a.SessionID, a.Timestamp.UnixNano())
+}
+
+// appendUnique appends activities from src to dst, skipping duplicates.
 func appendUnique(dst, src []types.Activity) []types.Activity {
 	seen := make(map[string]bool, len(dst))
 	for _, a := range dst {
-		key := a.SessionID + a.Timestamp.String()
-		seen[key] = true
+		seen[activityKey(a)] = true
 	}
 	for _, a := range src {
-		key := a.SessionID + a.Timestamp.String()
-		if !seen[key] {
+		k := activityKey(a)
+		if !seen[k] {
 			dst = append(dst, a)
-			seen[key] = true
+			seen[k] = true
 		}
 	}
 	return dst
@@ -235,9 +246,7 @@ func appendUnique(dst, src []types.Activity) []types.Activity {
 
 // sortMatchesByPriority sorts matches in descending priority order.
 func sortMatchesByPriority(matches []types.RuleMatch) {
-	for i := 1; i < len(matches); i++ {
-		for j := i; j > 0 && matches[j].Rule.Priority > matches[j-1].Rule.Priority; j-- {
-			matches[j], matches[j-1] = matches[j-1], matches[j]
-		}
-	}
+	slices.SortFunc(matches, func(a, b types.RuleMatch) int {
+		return b.Rule.Priority - a.Rule.Priority
+	})
 }

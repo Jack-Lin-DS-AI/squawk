@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Jack-Lin-DS-AI/squawk/internal/rules"
 	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
@@ -16,6 +18,7 @@ import (
 // the current event.
 type RuleEvaluator interface {
 	Evaluate(activities []types.Activity, event types.Event) []types.RuleMatch
+	ReplaceRules(newRules []types.Rule)
 }
 
 // ActionExecutor executes the action associated with a rule match and returns
@@ -29,6 +32,7 @@ type ActionExecutor interface {
 // activities, and evaluates supervision rules.
 type Server struct {
 	addr      string
+	rulesDir  string
 	tracker   *Tracker
 	evaluator RuleEvaluator
 	executor  ActionExecutor
@@ -37,10 +41,12 @@ type Server struct {
 
 // NewServer creates a new hook server bound to the given address. The executor
 // is optional; when nil the server falls back to built-in behavior (log-only
-// for PostToolUse, inline block for PreToolUse).
-func NewServer(addr string, tracker *Tracker, evaluator RuleEvaluator, executor ActionExecutor) *Server {
+// for PostToolUse, inline block for PreToolUse). The rulesDir is used for
+// hot-reloading rules via the admin API.
+func NewServer(addr, rulesDir string, tracker *Tracker, evaluator RuleEvaluator, executor ActionExecutor) *Server {
 	s := &Server{
 		addr:      addr,
+		rulesDir:  rulesDir,
 		tracker:   tracker,
 		evaluator: evaluator,
 		executor:  executor,
@@ -73,6 +79,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /hooks/pre-tool-use", s.handlePreToolUse)
 	s.mux.HandleFunc("POST /hooks/post-tool-use", s.handlePostToolUse)
 	s.mux.HandleFunc("POST /hooks/event", s.handleEvent)
+	s.mux.HandleFunc("POST /admin/reload-rules", s.handleReloadRules)
 }
 
 // handleHealth responds with a simple health check.
@@ -87,29 +94,37 @@ type statusResponse struct {
 
 // handleStatus returns tracked sessions and their activity counts.
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	s.tracker.mu.RLock()
-	sessions := make(map[string]int, len(s.tracker.sessions))
-	for id, activities := range s.tracker.sessions {
-		sessions[id] = len(activities)
-	}
-	s.tracker.mu.RUnlock()
-
-	writeJSON(w, http.StatusOK, statusResponse{Sessions: sessions})
+	writeJSON(w, http.StatusOK, statusResponse{Sessions: s.tracker.SessionCounts()})
 }
 
-// handlePreToolUse handles PreToolUse hook events. If a matching rule has an
-// ActionBlock action, the response instructs Claude Code to block the tool call.
-func (s *Server) handlePreToolUse(w http.ResponseWriter, r *http.Request) {
+// decodeEvent decodes and validates the event from the request body.
+// Returns false if decoding failed (error response already written).
+func decodeEvent(w http.ResponseWriter, r *http.Request) (types.Event, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 	var event types.Event
 	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "failed to decode request body: " + err.Error(),
 		})
-		return
+		return event, false
 	}
-
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
+	}
+	return event, true
+}
+
+// blockResponse builds a default block HookResponse from the rule's action message.
+func blockResponse(action types.Action) types.HookResponse {
+	return types.HookResponse{Decision: "block", Reason: action.Message}
+}
+
+// handlePreToolUse handles PreToolUse hook events. If a matching rule has an
+// ActionBlock action, the response instructs Claude Code to block the tool call.
+func (s *Server) handlePreToolUse(w http.ResponseWriter, r *http.Request) {
+	event, ok := decodeEvent(w, r)
+	if !ok {
+		return
 	}
 
 	activities := s.tracker.GetActivities(event.SessionID)
@@ -117,32 +132,20 @@ func (s *Server) handlePreToolUse(w http.ResponseWriter, r *http.Request) {
 
 	// Check if any match requires blocking the current event.
 	for _, m := range matches {
-		if m.Rule.Action.Type == types.ActionBlock {
-			if !eventInScope(event, m.Rule.Action) {
-				continue
-			}
-			if s.executor != nil {
-				resp, err := s.executor.Execute(m)
-				if err != nil {
-					log.Printf("executor error for rule %q: %v", m.Rule.Name, err)
-					writeJSON(w, http.StatusOK, types.HookResponse{
-						Decision: "block",
-						Reason:   m.Rule.Action.Message,
-					})
-					return
-				}
-				if resp != nil {
-					writeJSON(w, http.StatusOK, *resp)
-					return
-				}
-			}
-			// Fallback: no executor or nil response.
-			writeJSON(w, http.StatusOK, types.HookResponse{
-				Decision: "block",
-				Reason:   m.Rule.Action.Message,
-			})
-			return
+		if m.Rule.Action.Type != types.ActionBlock || !eventInScope(event, m.Rule.Action) {
+			continue
 		}
+		if s.executor != nil {
+			resp, err := s.executor.Execute(m)
+			if err != nil {
+				log.Printf("executor error for rule %q: %v", m.Rule.Name, err)
+			} else if resp != nil {
+				writeJSON(w, http.StatusOK, *resp)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, blockResponse(m.Rule.Action))
+		return
 	}
 
 	// No blocking rules matched — allow.
@@ -152,16 +155,9 @@ func (s *Server) handlePreToolUse(w http.ResponseWriter, r *http.Request) {
 // handlePostToolUse handles PostToolUse hook events. It records the activity
 // and evaluates rules. Matches are logged but do not block.
 func (s *Server) handlePostToolUse(w http.ResponseWriter, r *http.Request) {
-	var event types.Event
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "failed to decode request body: " + err.Error(),
-		})
+	event, ok := decodeEvent(w, r)
+	if !ok {
 		return
-	}
-
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now()
 	}
 
 	s.tracker.Record(event)
@@ -197,20 +193,12 @@ func (s *Server) handlePostToolUse(w http.ResponseWriter, r *http.Request) {
 // handleEvent handles generic hook events (Notification, etc.). It records
 // the activity without evaluation.
 func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
-	var event types.Event
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "failed to decode request body: " + err.Error(),
-		})
+	event, ok := decodeEvent(w, r)
+	if !ok {
 		return
 	}
 
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now()
-	}
-
 	s.tracker.Record(event)
-
 	writeJSON(w, http.StatusOK, types.HookResponse{})
 }
 
@@ -245,6 +233,31 @@ func eventInScope(event types.Event, action types.Action) bool {
 	}
 
 	return true
+}
+
+// handleReloadRules reloads rules from disk and replaces them in the engine.
+func (s *Server) handleReloadRules(w http.ResponseWriter, _ *http.Request) {
+	if s.rulesDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "rules directory not configured",
+		})
+		return
+	}
+
+	loadedRules, err := rules.LoadRules(s.rulesDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": fmt.Sprintf("failed to reload rules: %v", err),
+		})
+		return
+	}
+
+	s.evaluator.ReplaceRules(loadedRules)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "reloaded",
+		"count":  len(loadedRules),
+	})
 }
 
 // writeJSON encodes v as JSON and writes it to w with the given status code.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -89,10 +90,49 @@ func expandTemplate(message string, match types.RuleMatch) string {
 	return result
 }
 
-// sendNotification attempts to send a macOS desktop notification using
-// osascript. Failures are silently ignored because notifications are
-// best-effort and must never block the hook response.
+// sendNotification attempts to send a desktop notification. Currently only
+// supported on macOS via osascript. Failures are silently ignored because
+// notifications are best-effort and must never block the hook response.
 func sendNotification(title, message string) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
 	script := fmt.Sprintf(`display notification %q with title %q`, message, title)
 	_ = exec.Command("osascript", "-e", script).Run()
+}
+
+// LoggingExecutor wraps an Executor and an ActionLogger so that every executed
+// action is automatically persisted to the log file. It implements the
+// ActionExecutor interface defined in the monitor package.
+type LoggingExecutor struct {
+	inner  *Executor
+	logger *ActionLogger
+}
+
+// NewLoggingExecutor creates a LoggingExecutor that delegates execution to
+// inner and logs every match via logger.
+func NewLoggingExecutor(inner *Executor, logger *ActionLogger) *LoggingExecutor {
+	return &LoggingExecutor{inner: inner, logger: logger}
+}
+
+// Execute delegates to the inner executor and logs the match and response.
+// For side-effect-only actions (notify, log) where the inner executor returns
+// a nil response, the expanded template message is used for logging.
+func (le *LoggingExecutor) Execute(match types.RuleMatch) (*types.HookResponse, error) {
+	resp, err := le.inner.Execute(match)
+	if err != nil {
+		return nil, err
+	}
+
+	// For actions that return nil response, build a synthetic response with
+	// the expanded message so LogAction records the actual (not template) text.
+	logResp := resp
+	if logResp == nil {
+		logResp = &types.HookResponse{
+			Reason: expandTemplate(match.Rule.Action.Message, match),
+		}
+	}
+	le.logger.LogAction(match, logResp)
+
+	return resp, nil
 }

@@ -1,206 +1,62 @@
 # Squawk
 
-Stateful behavior supervision for AI coding agents.
+Stateful behavioral pattern detection for AI coding agents.
 
-Squawk is a lightweight daemon that monitors [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+Squawk monitors [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 tool usage via hooks and detects behavioral anti-patterns that emerge across
-multiple actions over time -- loops, oscillation, escalating bad habits --
-that no single-event hook can see.
-
-## The Problem
-
-AI coding agents get stuck. They retry the same failing command, weaken tests
-instead of fixing code, or delete more code than they add. These patterns
-unfold across many tool calls over minutes, not in a single event.
-
-Stateless hooks check each tool call in isolation. They can block `rm -rf` or
-protect `.env` files, but they cannot detect that an agent has edited the same
-test file five times without ever reading the source code. That requires
-memory.
-
-Squawk keeps a sliding window of recent activity and evaluates rules against
-the full history. It is a behavioral analyst, not a doorman.
-
-## How It Works
-
-```
-    Claude Code session
-    |
-    |  PreToolUse / PostToolUse hooks
-    |  (configured via settings.json)
-    v
-  curl -s -X POST http://localhost:3131/hooks/...
-    |
-    v
-  +-------------------------------------------+
-  |              squawk watch                  |
-  |                                            |
-  |   Activity Tracker                         |
-  |   [event1, event2, event3, ...]            |
-  |         |                                  |
-  |         v                                  |
-  |   Rule Engine                              |
-  |   - count events in time window            |
-  |   - correlate across event types           |
-  |   - detect absence of expected actions     |
-  |         |                                  |
-  |         v                                  |
-  |   Action: block / inject / notify          |
-  +-------------------------------------------+
-    |
-    v
-  JSON response to Claude Code
-  {"decision":"block","reason":"..."}
-```
-
-PreToolUse hooks can block the next action synchronously. PostToolUse hooks
-track patterns asynchronously for future evaluation.
+multiple actions over time — loops, oscillation, escalating bad habits — that
+no single-event hook can catch. It keeps a sliding window of recent activity
+and evaluates rules against the full history.
 
 ## Quick Start
 
-### Install
-
 ```bash
+# Install
 go install github.com/Jack-Lin-DS-AI/squawk/cmd/squawk@latest
-```
 
-### Initialize
-
-```bash
+# One-command setup: config + hooks + background daemon
 cd your-project
-squawk init
+squawk setup
 ```
 
-This creates `.squawk/config.yaml` and prints a hooks snippet to add to your
-Claude Code `~/.claude/settings.json`.
-
-### Configure hooks
-
-#### Option A: HTTP Hooks (Recommended)
-
-Claude Code 1.0.33+ supports HTTP hooks natively. No shell scripts or `jq`
-required -- Claude Code POSTs event JSON directly to squawk.
-
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Edit|Write|Bash",
-      "hooks": [{"type": "http", "url": "http://localhost:3131/hooks/pre-tool-use", "timeout": 5}]
-    }],
-    "PostToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "http", "url": "http://localhost:3131/hooks/post-tool-use", "timeout": 5}]
-    }],
-    "PostToolUseFailure": [{
-      "matcher": "",
-      "hooks": [{"type": "http", "url": "http://localhost:3131/hooks/post-tool-use", "timeout": 5}]
-    }]
-  }
-}
-```
-
-#### Option B: Script Hooks (Universal)
-
-For older Claude Code versions that do not support HTTP hooks. Requires `jq`.
+Restart Claude Code and squawk is active. `squawk setup` is idempotent.
 
 ```bash
-chmod +x scripts/hook.sh
-```
-
-Then add to `~/.claude/settings.json`, replacing `/path/to/squawk` with the
-actual path to your squawk checkout:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Edit|Write|Bash",
-      "hooks": [{"type": "command", "command": "/path/to/squawk/scripts/hook.sh PreToolUse"}]
-    }],
-    "PostToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "/path/to/squawk/scripts/hook.sh PostToolUse"}]
-    }],
-    "PostToolUseFailure": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "/path/to/squawk/scripts/hook.sh PostToolUseFailure"}]
-    }]
-  }
-}
-```
-
-The script reads hook JSON from stdin, forwards it to the squawk server, and
-translates the response into the format Claude Code expects. If squawk is not
-running, the script exits successfully so Claude Code continues uninterrupted.
-
-### Start watching
-
-```bash
-squawk watch
-```
-
-Squawk starts an HTTP server on `localhost:3131`, loads rules from `./rules/`,
-and begins evaluating incoming hook events.
-
-### Verify
-
-```bash
-# In another terminal:
-squawk status
-squawk rules list
-squawk log --tail 20
-```
-
-### Test rules without a live session
-
-```bash
-squawk rules test --scenario test-modification
-squawk rules test --scenario excessive-retry
-squawk rules test --scenario blind-creation
+squawk status                  # daemon + hooks + sessions
+squawk stop                    # stop the daemon
+squawk teardown                # stop + remove hooks
+squawk stats                   # intervention metrics
+squawk log --tail 20           # recent action log
 ```
 
 ## Built-in Rules
 
-Squawk ships with three rules enabled out of the box in `rules/default.yaml`:
-
 | Rule | Trigger | Action |
 |------|---------|--------|
-| `test-only-modification` | 3+ test file edits in 5 min with zero source reads or edits | block (cooldown) |
-| `excessive-retry-same-command` | Same command fails 3+ times in 3 min | block (cooldown) |
-| `blind-file-creation` | 3+ new files created in 5 min with zero reads | inject |
+| `test-only-modification` | 3+ test edits, zero source reads (5 min) | block (30s cooldown) |
+| `excessive-retry-same-command` | Same command fails 3+ times (3 min) | block (60s cooldown) |
+| `blind-file-creation` | 3+ file creates, zero reads (5 min) | inject |
+| `same-file-excessive-edits` | 8+ edits (5 min) | inject |
+| `write-before-read` | 3+ writes, zero reads (2 min) | inject |
+| `session-context-warning` | 50+ tool calls (30 min) | inject |
 
-Each rule uses AND-logic across multiple conditions, correlating event counts
-and absence of expected actions within a sliding time window.
+## Managing Rules
 
-Blocking rules include a cooldown period after firing. Once a block is issued,
-the rule will not fire again for a configurable duration (default 60 seconds).
-This prevents blocking spirals where the agent's recovery attempts are
-themselves blocked by the same rule.
+```bash
+squawk rules list                          # show all rules
+squawk rules enable/disable <name>         # toggle + hot-reload
+squawk rules remove <name> --force         # permanently remove
+squawk rules add                           # interactive creation
+squawk rules test --scenario <name>        # test against simulated events
+```
 
-## Rule Catalog
+## Custom Rules
 
-The full roadmap of 12 rules is documented in [docs/RULES_CATALOG.md](docs/RULES_CATALOG.md),
-covering:
-
-- **edit-oscillation** -- A-B-A code reversion detection (content hashing)
-- **repeated-identical-edit** -- same old/new transformation applied repeatedly
-- **test-assertion-weakening** -- progressive weakening of test assertions
-- **error-handling-removal** -- stripping error handling over time
-- **session-context-warning** -- long session drift notification
-
-Every rule in the catalog requires state that stateless hooks cannot provide.
-
-## Writing Custom Rules
-
-Create a YAML file in `rules/` (or use `squawk rules add`):
+Create a YAML file in `rules/`:
 
 ```yaml
 rules:
   - name: my-custom-rule
-    description: "Detect excessive edits to config files"
     enabled: true
     priority: 5
     trigger:
@@ -214,112 +70,25 @@ rules:
     action:
       type: inject
       message: |
-        You have modified configuration files {count} times.
-        Please verify these changes are intentional and consistent.
+        You have modified config files {count} times.
+        Verify these changes are intentional.
 ```
 
-### Condition fields
+Condition fields: `event`, `tool` (regex), `file_pattern` / `file_pattern_exclude` (glob), `count`, `within`, `negate`.
+Action types: `block`, `inject`, `notify`, `log`.
 
-| Field | Description |
-|-------|-------------|
-| `event` | Hook event: `PreToolUse`, `PostToolUse`, `PostToolUseFailure` |
-| `tool` | Tool name regex: `"Edit\|Write"`, `"Bash"`, `"Read\|Glob\|Grep"` |
-| `file_pattern` | Glob for matching files: `"*_test.go"`, `"*.ts"` |
-| `file_pattern_exclude` | Glob for excluding files |
-| `count` | Number of occurrences required to trigger |
-| `within` | Time window: `"3m"`, `"5m"`, `"10m"` |
-| `negate` | Invert the condition (true = require absence) |
+## Design
 
-### Action types
-
-| Type | Behavior |
-|------|----------|
-| `block` | Return `{"decision":"block"}` to PreToolUse -- prevents the action |
-| `inject` | Inject a guidance message into the agent's context |
-| `notify` | Log a warning without blocking |
-
-## Complementary Tools
-
-Squawk focuses exclusively on stateful multi-event pattern detection. For
-stateless single-event guards, use these established tools:
-
-| Need | Tool |
-|------|------|
-| Destructive command blocking | [hardstop](https://github.com/frmoretto/hardstop) |
-| Git safety and security config | [trailofbits/claude-code-config](https://github.com/trailofbits/claude-code-config) |
-| File protection and quality gates | [claudekit](https://github.com/carlrannaberg/claudekit) |
-| TDD enforcement | [tdd-guard](https://github.com/nizos/tdd-guard) |
-| Prompt injection defense | [lasso-security/claude-hooks](https://github.com/lasso-security/claude-hooks) |
-
-`squawk init` recommends these tools alongside its own configuration.
-
-## Architecture
-
-```
-cmd/squawk/          CLI entrypoint (cobra)
-internal/
-  types/             Shared types: Event, Rule, Condition, Action, Activity
-  rules/             Rule engine: YAML parsing, condition evaluation
-  monitor/           HTTP hook server, activity tracker (sliding window)
-  action/            Action executor (block, inject, notify) and log writer
-  config/            Config loading/saving, hooks snippet generation
-rules/               Default and community rule YAML files
-```
-
-Key design decisions:
-
-- Zero external dependencies beyond cobra and yaml.v3
-- In-process sliding window -- no database, no Redis
-- Rules are pure YAML -- no scripting language, no Rego
-- Fail-open: if squawk is not running, hooks silently succeed
-
-### Subagent Detection
-
-Claude Code can spawn subagents (e.g., via the Task tool) that make their own
-tool calls. Squawk detects subagent behavior automatically because the parent
-session's hooks fire for all subagent tool calls. All subagents share the
-parent `session_id`, so their activity is tracked in the same sliding window as
-the parent session.
-
-This means squawk will block a subagent that edits test files without reading
-source code, retries a failing command excessively, or creates files blindly --
-the same rules apply regardless of which agent in the session is acting.
-
-### Fail-Open Design
-
-Squawk is designed to never interfere with Claude Code's availability:
-
-- If squawk is not running, hooks fail silently and Claude Code continues
-  normally. HTTP hooks return a connection error that Claude Code treats as a
-  no-op. Script hooks use `|| true` semantics.
-- HTTP hooks have a **5-second timeout**. If squawk takes longer than that to
-  respond, Claude Code proceeds as if the hook returned "allow".
-- Squawk never blocks Claude Code from starting or shutting down. It is a
-  sidecar process with no lifecycle coupling to the agent.
+- **Fail-open**: if squawk is down, Claude Code continues normally
+- **Hot-reload**: rule changes take effect immediately
+- **Subagent-aware**: rules apply across the entire session including subagents
 
 ## Contributing
 
-Contributions are welcome. To get started:
-
 ```bash
-git clone https://github.com/Jack-Lin-DS-AI/squawk.git
-cd squawk
-go build ./...
-go test -race ./...
+git clone https://github.com/Jack-Lin-DS-AI/squawk.git && cd squawk
+go build ./... && go test -race ./...
 ```
-
-### Adding rules
-
-1. Create a YAML file in `rules/community/`
-2. Follow the condition schema in `internal/types/types.go`
-3. Add a test scenario in `cmd/squawk/main.go` (`buildTestScenario`)
-4. Run `squawk rules test --scenario your-scenario` to verify
-
-### Code style
-
-- `gofmt` and `goimports` are mandatory
-- Wrap errors with context: `fmt.Errorf("failed to X: %w", err)`
-- Table-driven tests with the `-race` flag
 
 ## License
 

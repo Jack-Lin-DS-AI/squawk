@@ -60,21 +60,16 @@ func (t *Tracker) GetActivities(sessionID string) []types.Activity {
 	return result
 }
 
-// GetActivitiesSince returns activities for a session that occurred at or
-// after the given time.
-func (t *Tracker) GetActivitiesSince(sessionID string, since time.Time) []types.Activity {
+// SessionCounts returns the number of tracked activities per session.
+func (t *Tracker) SessionCounts() map[string]int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	activities := t.sessions[sessionID]
-
-	var result []types.Activity
-	for _, a := range activities {
-		if !a.Timestamp.Before(since) {
-			result = append(result, a)
-		}
+	counts := make(map[string]int, len(t.sessions))
+	for sid, acts := range t.sessions {
+		counts[sid] = len(acts)
 	}
-	return result
+	return counts
 }
 
 // cleanupLocked removes activities older than the window for a given session.

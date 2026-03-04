@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,8 +20,10 @@ import (
 
 	"github.com/Jack-Lin-DS-AI/squawk/internal/action"
 	"github.com/Jack-Lin-DS-AI/squawk/internal/config"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/daemon"
 	"github.com/Jack-Lin-DS-AI/squawk/internal/monitor"
 	"github.com/Jack-Lin-DS-AI/squawk/internal/rules"
+	"github.com/Jack-Lin-DS-AI/squawk/internal/stats"
 	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -29,7 +32,21 @@ import (
 const (
 	version    = "0.1.0"
 	configPath = ".squawk/config.yaml"
+
+	httpClientTimeout   = 2 * time.Second
+	gracefulStopTimeout = 5 * time.Second
+	trackerWindow       = 10 * time.Minute
 )
+
+// squawkDir returns the .squawk directory derived from the config's log file path.
+func squawkDir(cfg *types.Config) string {
+	return filepath.Dir(cfg.LogFile)
+}
+
+// adminURL constructs a URL for the squawk admin API.
+func adminURL(port int, path string) string {
+	return fmt.Sprintf("http://localhost:%d%s", port, path)
+}
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -45,12 +62,18 @@ func newRootCmd() *cobra.Command {
 		Version: version,
 	}
 
+	root.PersistentFlags().StringP("config", "c", configPath, "path to config file")
+
 	root.AddCommand(
 		newInitCmd(),
 		newWatchCmd(),
+		newSetupCmd(),
+		newStopCmd(),
+		newTeardownCmd(),
 		newRulesCmd(),
 		newStatusCmd(),
 		newLogCmd(),
+		newStatsCmd(),
 	)
 
 	return root
@@ -101,15 +124,38 @@ func newInitCmd() *cobra.Command {
 // newWatchCmd creates the `squawk watch` subcommand that starts the HTTP
 // monitoring server with full rule engine integration and graceful shutdown.
 func newWatchCmd() *cobra.Command {
-	var cfgPath string
+	var daemonMode bool
 
 	cmd := &cobra.Command{
 		Use:   "watch",
 		Short: "Start the squawk monitoring server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig(cfgPath)
+			cfg, _, err := loadConfigFromCmd(cmd)
 			if err != nil {
 				return err
+			}
+
+			sdir := squawkDir(cfg)
+
+			// Daemon mode: re-exec as background process.
+			if daemonMode && !daemon.IsDaemonProcess() {
+				pid, err := daemon.Daemonize(sdir, os.Args)
+				if err != nil {
+					return fmt.Errorf("failed to daemonize: %w", err)
+				}
+				fmt.Printf("Squawk daemon started (PID %d)\n", pid)
+				fmt.Printf("Logs: %s\n", daemon.DaemonLogPath(sdir))
+				return nil
+			}
+
+			// If daemon child, acquire PID file.
+			var pidFile *daemon.PIDFile
+			if daemon.IsDaemonProcess() {
+				pidFile, err = daemon.Acquire(sdir)
+				if err != nil {
+					return fmt.Errorf("failed to acquire PID file: %w", err)
+				}
+				defer pidFile.Release()
 			}
 
 			// Load rules from the configured directory.
@@ -119,8 +165,8 @@ func newWatchCmd() *cobra.Command {
 			}
 			engine := rules.NewEngine(loadedRules)
 
-			// Create activity tracker with a 10-minute sliding window.
-			tracker := monitor.NewTracker(10 * time.Minute)
+			// Create activity tracker with a sliding window.
+			tracker := monitor.NewTracker(trackerWindow)
 
 			// Create action logger.
 			if err := os.MkdirAll(filepath.Dir(cfg.LogFile), 0o755); err != nil {
@@ -132,12 +178,15 @@ func newWatchCmd() *cobra.Command {
 			}
 			defer actionLogger.Close()
 
-			// Create action executor.
-			executor := action.NewExecutor(log.Default())
+			// Create action executor wrapped with logging.
+			executor := action.NewLoggingExecutor(
+				action.NewExecutor(log.Default()),
+				actionLogger,
+			)
 
 			// Create and configure the HTTP server.
 			addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-			srv := monitor.NewServer(addr, tracker, engine, executor)
+			srv := monitor.NewServer(addr, cfg.RulesDir, tracker, engine, executor)
 
 			fmt.Printf("Starting squawk on %s...\n", addr)
 			fmt.Printf("Loaded %d rule(s) from %s\n", len(loadedRules), cfg.RulesDir)
@@ -146,14 +195,14 @@ func newWatchCmd() *cobra.Command {
 			httpServer := &http.Server{
 				Addr:         addr,
 				Handler:      srv,
-				ReadTimeout:  5 * time.Second,
-				WriteTimeout: 5 * time.Second,
+				ReadTimeout:  gracefulStopTimeout,
+				WriteTimeout: gracefulStopTimeout,
 				IdleTimeout:  30 * time.Second,
 			}
 
 			errCh := make(chan error, 1)
 			go func() {
-				if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					errCh <- fmt.Errorf("server error: %w", err)
 				}
 				close(errCh)
@@ -172,8 +221,8 @@ func newWatchCmd() *cobra.Command {
 				}
 			}
 
-			// Give in-flight requests 5 seconds to complete.
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Give in-flight requests time to complete.
+			ctx, cancel := context.WithTimeout(context.Background(), gracefulStopTimeout)
 			defer cancel()
 
 			if err := httpServer.Shutdown(ctx); err != nil {
@@ -185,7 +234,7 @@ func newWatchCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", configPath, "path to config file")
+	cmd.Flags().BoolVarP(&daemonMode, "daemon", "d", false, "run as background daemon")
 	return cmd
 }
 
@@ -199,19 +248,20 @@ func newRulesCmd() *cobra.Command {
 	rulesCmd.AddCommand(newRulesListCmd())
 	rulesCmd.AddCommand(newRulesTestCmd())
 	rulesCmd.AddCommand(newRulesAddCmd())
+	rulesCmd.AddCommand(newRulesEnableCmd())
+	rulesCmd.AddCommand(newRulesDisableCmd())
+	rulesCmd.AddCommand(newRulesRemoveCmd())
 
 	return rulesCmd
 }
 
 // newRulesListCmd creates the `squawk rules list` subcommand.
 func newRulesListCmd() *cobra.Command {
-	var cfgPath string
-
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "list",
 		Short: "List all loaded rules",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig(cfgPath)
+			cfg, _, err := loadConfigFromCmd(cmd)
 			if err != nil {
 				return err
 			}
@@ -239,22 +289,17 @@ func newRulesListCmd() *cobra.Command {
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", configPath, "path to config file")
-	return cmd
 }
 
 // newRulesAddCmd creates the `squawk rules add` subcommand for interactive
 // rule creation.
 func newRulesAddCmd() *cobra.Command {
-	var cfgPath string
-
 	cmd := &cobra.Command{
 		Use:   "add [name]",
 		Short: "Interactively create a new rule",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig(cfgPath)
+			cfg, _, err := loadConfigFromCmd(cmd)
 			if err != nil {
 				return err
 			}
@@ -366,7 +411,6 @@ func newRulesAddCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", configPath, "path to config file")
 	return cmd
 }
 
@@ -383,7 +427,6 @@ func promptInput(scanner *bufio.Scanner, prompt string) string {
 // events against loaded rules using built-in test scenarios.
 func newRulesTestCmd() *cobra.Command {
 	var rulesDir string
-	var cfgPath string
 
 	cmd := &cobra.Command{
 		Use:   "test --scenario <name>",
@@ -398,7 +441,7 @@ Available scenarios:
 			// Determine rules directory.
 			dir := rulesDir
 			if dir == "" {
-				cfg, err := loadConfig(cfgPath)
+				cfg, _, err := loadConfigFromCmd(cmd)
 				if err != nil {
 					return err
 				}
@@ -426,7 +469,7 @@ Available scenarios:
 			fmt.Println(strings.Repeat("-", 60))
 
 			// Run events through the engine, accumulating activities.
-			tracker := monitor.NewTracker(10 * time.Minute)
+			tracker := monitor.NewTracker(trackerWindow)
 			var totalMatches int
 
 			for i, event := range events {
@@ -460,7 +503,6 @@ Available scenarios:
 	}
 
 	cmd.Flags().StringVar(&rulesDir, "rules-dir", "", "path to rules directory (overrides config)")
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", configPath, "path to config file")
 	cmd.Flags().String("scenario", "", "test scenario to run")
 	return cmd
 }
@@ -469,149 +511,367 @@ Available scenarios:
 // scenario name.
 func buildTestScenario(scenario string) ([]types.Event, string, error) {
 	now := time.Now()
-	sessionID := "test-session-001"
+	const session = "test-session-001"
+
+	event := func(hook, tool string, input map[string]any, ago time.Duration) types.Event {
+		return types.Event{
+			SessionID:     session,
+			HookEventName: hook,
+			ToolName:      tool,
+			ToolInput:     input,
+			Timestamp:     now.Add(-ago),
+		}
+	}
+	file := func(path string) map[string]any { return map[string]any{"file_path": path} }
+	cmd := func(c string) map[string]any { return map[string]any{"command": c} }
 
 	switch scenario {
 	case "test-modification":
-		// Simulate editing test files 3 times without reading source code.
-		events := []types.Event{
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUse",
-				ToolName:      "Edit",
-				ToolInput:     map[string]any{"file_path": "pkg/handler/handler_test.go"},
-				Timestamp:     now.Add(-4 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUse",
-				ToolName:      "Write",
-				ToolInput:     map[string]any{"file_path": "pkg/handler/handler_test.go"},
-				Timestamp:     now.Add(-3 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUse",
-				ToolName:      "Edit",
-				ToolInput:     map[string]any{"file_path": "pkg/handler/handler_test.go"},
-				Timestamp:     now.Add(-2 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PreToolUse",
-				ToolName:      "Edit",
-				ToolInput:     map[string]any{"file_path": "pkg/handler/handler_test.go"},
-				Timestamp:     now,
-			},
-		}
-		return events, "Repeated test file modifications without reading source code", nil
+		return []types.Event{
+			event("PostToolUse", "Edit", file("pkg/handler/handler_test.go"), 4*time.Minute),
+			event("PostToolUse", "Write", file("pkg/handler/handler_test.go"), 3*time.Minute),
+			event("PostToolUse", "Edit", file("pkg/handler/handler_test.go"), 2*time.Minute),
+			event("PreToolUse", "Edit", file("pkg/handler/handler_test.go"), 0),
+		}, "Repeated test file modifications without reading source code", nil
 
 	case "excessive-retry":
-		// Simulate a Bash command failing 3 times.
-		events := []types.Event{
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUseFailure",
-				ToolName:      "Bash",
-				ToolInput:     map[string]any{"command": "go build ./..."},
-				Timestamp:     now.Add(-2 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUseFailure",
-				ToolName:      "Bash",
-				ToolInput:     map[string]any{"command": "go build ./..."},
-				Timestamp:     now.Add(-1 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUseFailure",
-				ToolName:      "Bash",
-				ToolInput:     map[string]any{"command": "go build ./..."},
-				Timestamp:     now,
-			},
-		}
-		return events, "Same command failing repeatedly", nil
+		return []types.Event{
+			event("PostToolUseFailure", "Bash", cmd("go build ./..."), 2*time.Minute),
+			event("PostToolUseFailure", "Bash", cmd("go build ./..."), 1*time.Minute),
+			event("PostToolUseFailure", "Bash", cmd("go build ./..."), 0),
+		}, "Same command failing repeatedly", nil
 
 	case "blind-creation":
-		// Simulate creating files without reading existing code.
-		events := []types.Event{
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUse",
-				ToolName:      "Write",
-				ToolInput:     map[string]any{"file_path": "pkg/auth/auth.go"},
-				Timestamp:     now.Add(-4 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUse",
-				ToolName:      "Write",
-				ToolInput:     map[string]any{"file_path": "pkg/auth/middleware.go"},
-				Timestamp:     now.Add(-3 * time.Minute),
-			},
-			{
-				SessionID:     sessionID,
-				HookEventName: "PostToolUse",
-				ToolName:      "Write",
-				ToolInput:     map[string]any{"file_path": "pkg/auth/token.go"},
-				Timestamp:     now.Add(-2 * time.Minute),
-			},
-		}
-		return events, "Creating multiple files without reading existing code", nil
+		return []types.Event{
+			event("PostToolUse", "Write", file("pkg/auth/auth.go"), 4*time.Minute),
+			event("PostToolUse", "Write", file("pkg/auth/middleware.go"), 3*time.Minute),
+			event("PostToolUse", "Write", file("pkg/auth/token.go"), 2*time.Minute),
+		}, "Creating multiple files without reading existing code", nil
 
 	default:
 		return nil, "", fmt.Errorf("unknown scenario %q (options: test-modification, excessive-retry, blind-creation)", scenario)
 	}
 }
 
-// newStatusCmd creates the `squawk status` subcommand that queries the
-// running squawk server's /status endpoint.
-func newStatusCmd() *cobra.Command {
-	var port int
+// newSetupCmd creates the `squawk setup` one-command bootstrap.
+func newSetupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "setup",
+		Short: "One-command setup: init + hooks + daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgPath, _ := cmd.Flags().GetString("config")
+
+			// Create .squawk directory and config.
+			if err := os.MkdirAll(".squawk", 0o755); err != nil {
+				return fmt.Errorf("failed to create .squawk directory: %w", err)
+			}
+
+			cfg := config.Default()
+			_, statErr := os.Stat(cfgPath)
+			switch {
+			case os.IsNotExist(statErr):
+				if err := config.Save(cfg, cfgPath); err != nil {
+					return fmt.Errorf("failed to save default config: %w", err)
+				}
+				fmt.Println("Created .squawk/config.yaml")
+			case statErr != nil:
+				return fmt.Errorf("failed to check config file: %w", statErr)
+			default:
+				var loadErr error
+				cfg, loadErr = config.Load(cfgPath)
+				if loadErr != nil {
+					return fmt.Errorf("failed to load config: %w", loadErr)
+				}
+				fmt.Println("Using existing .squawk/config.yaml")
+			}
+
+			// Install hooks into settings.json.
+			settingsPath, err := config.SettingsPath()
+			if err != nil {
+				return fmt.Errorf("failed to determine settings path: %w", err)
+			}
+			if err := config.InstallHooks(settingsPath, cfg.Server.Port); err != nil {
+				return fmt.Errorf("failed to install hooks: %w", err)
+			}
+			fmt.Printf("Installed hooks into %s\n", settingsPath)
+
+			// Start daemon if not already running.
+			sdir := squawkDir(cfg)
+			running, pid, err := daemon.IsRunning(sdir)
+			if err != nil {
+				return fmt.Errorf("failed to check daemon status: %w", err)
+			}
+			if running {
+				fmt.Printf("Daemon already running (PID %d)\n", pid)
+			} else {
+				// Do not pass --daemon; the env sentinel _SQUAWK_DAEMON=1
+				// tells the child to acquire the PID file without re-daemonizing.
+				watchArgs := []string{os.Args[0], "watch", "--config", cfgPath}
+				newPID, err := daemon.Daemonize(sdir, watchArgs)
+				if err != nil {
+					return fmt.Errorf("failed to start daemon: %w", err)
+				}
+				fmt.Printf("Started daemon (PID %d)\n", newPID)
+			}
+
+			fmt.Println("\nRestart Claude Code to activate hooks.")
+			return nil
+		},
+	}
+}
+
+// newStopCmd creates the `squawk stop` subcommand.
+func newStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the squawk daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := loadConfigFromCmd(cmd)
+			if err != nil {
+				return err
+			}
+
+			sdir := squawkDir(cfg)
+			running, pid, err := daemon.IsRunning(sdir)
+			if err != nil {
+				return fmt.Errorf("failed to check daemon status: %w", err)
+			}
+			if !running {
+				fmt.Println("No daemon running.")
+				return nil
+			}
+
+			fmt.Printf("Stopping daemon (PID %d)...\n", pid)
+			if err := daemon.StopDaemon(sdir, gracefulStopTimeout); err != nil {
+				return fmt.Errorf("failed to stop daemon: %w", err)
+			}
+			fmt.Println("Daemon stopped.")
+			return nil
+		},
+	}
+}
+
+// newTeardownCmd creates the `squawk teardown` subcommand.
+func newTeardownCmd() *cobra.Command {
+	var removeData bool
 
 	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Check the status of the running squawk server",
+		Use:   "teardown",
+		Short: "Stop daemon and remove hooks",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			url := fmt.Sprintf("http://localhost:%d/status", port)
-
-			resp, err := http.Get(url)
+			cfg, _, err := loadConfigFromCmd(cmd)
 			if err != nil {
-				return fmt.Errorf("failed to connect to squawk server at %s: %w", url, err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("failed to read response: %w", err)
+				return err
 			}
 
-			fmt.Println(string(body))
+			// Stop daemon if running.
+			sdir := squawkDir(cfg)
+			running, pid, err := daemon.IsRunning(sdir)
+			if err != nil {
+				fmt.Printf("Warning: failed to check daemon status: %v\n", err)
+			}
+			if running {
+				fmt.Printf("Stopping daemon (PID %d)...\n", pid)
+				if err := daemon.StopDaemon(sdir, gracefulStopTimeout); err != nil {
+					fmt.Printf("Warning: failed to stop daemon: %v\n", err)
+				} else {
+					fmt.Println("Daemon stopped.")
+				}
+			}
+
+			// Remove hooks from settings.json.
+			settingsPath, err := config.SettingsPath()
+			if err != nil {
+				return fmt.Errorf("failed to determine settings path: %w", err)
+			}
+			if err := config.UninstallHooks(settingsPath, cfg.Server.Port); err != nil {
+				fmt.Printf("Warning: failed to remove hooks: %v\n", err)
+			} else {
+				fmt.Printf("Removed hooks from %s\n", settingsPath)
+			}
+
+			// Optionally remove data.
+			if removeData {
+				if err := os.RemoveAll(sdir); err != nil {
+					return fmt.Errorf("failed to remove squawk directory %q: %w", sdir, err)
+				}
+				fmt.Printf("Removed %s directory.\n", sdir)
+			}
+
+			fmt.Println("\nRestart Claude Code to deactivate hooks.")
 			return nil
 		},
 	}
 
-	cmd.Flags().IntVarP(&port, "port", "p", 3131, "squawk server port")
+	cmd.Flags().BoolVar(&removeData, "remove-data", false, "also delete .squawk/ directory")
 	return cmd
+}
+
+// newRulesEnableCmd creates the `squawk rules enable <name>` subcommand.
+func newRulesEnableCmd() *cobra.Command {
+	return newRulesToggleCmd("enable", rules.EnableRule)
+}
+
+// newRulesDisableCmd creates the `squawk rules disable <name>` subcommand.
+func newRulesDisableCmd() *cobra.Command {
+	return newRulesToggleCmd("disable", rules.DisableRule)
+}
+
+// newRulesToggleCmd creates an enable or disable subcommand.
+func newRulesToggleCmd(verb string, fn func(string, string) (string, error)) *cobra.Command {
+	// Capitalize first letter for display messages.
+	titled := strings.ToUpper(verb[:1]) + verb[1:]
+	return &cobra.Command{
+		Use:   verb + " <name>",
+		Short: titled + " a rule",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := loadConfigFromCmd(cmd)
+			if err != nil {
+				return err
+			}
+
+			path, err := fn(cfg.RulesDir, args[0])
+			if err != nil {
+				return fmt.Errorf("failed to %s rule: %w", verb, err)
+			}
+			fmt.Printf("%sd rule %q in %s\n", titled, args[0], path)
+
+			triggerReload(cfg.Server.Port)
+			return nil
+		},
+	}
+}
+
+// newRulesRemoveCmd creates the `squawk rules remove <name>` subcommand.
+func newRulesRemoveCmd() *cobra.Command {
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a rule permanently",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !force {
+				return fmt.Errorf("use --force to confirm permanent removal of rule %q", args[0])
+			}
+
+			cfg, _, err := loadConfigFromCmd(cmd)
+			if err != nil {
+				return err
+			}
+
+			path, remaining, err := rules.RemoveRule(cfg.RulesDir, args[0])
+			if err != nil {
+				return fmt.Errorf("failed to remove rule: %w", err)
+			}
+
+			if remaining == 0 {
+				fmt.Printf("Removed rule %q (deleted empty file %s)\n", args[0], path)
+			} else {
+				fmt.Printf("Removed rule %q from %s (%d rules remaining)\n", args[0], path, remaining)
+			}
+
+			triggerReload(cfg.Server.Port)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "confirm permanent removal")
+	return cmd
+}
+
+// triggerReload sends a reload request to the running server. Fails silently
+// if the server is not running (fail-open).
+func triggerReload(port int) {
+	url := adminURL(port, "/admin/reload-rules")
+	client := &http.Client{Timeout: httpClientTimeout}
+	resp, err := client.Post(url, "application/json", nil)
+	if err != nil {
+		// Server not running — that's fine, rules will be picked up on next start.
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Println("Rules reloaded in running server.")
+	} else {
+		fmt.Printf("Warning: server returned %d when reloading rules\n", resp.StatusCode)
+	}
+}
+
+// newStatusCmd creates the `squawk status` subcommand that shows daemon,
+// hooks, and session status.
+func newStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show daemon, hooks, and session status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := loadConfigFromCmd(cmd)
+			if err != nil {
+				return err
+			}
+
+			sdir := squawkDir(cfg)
+
+			// Daemon status.
+			running, pid, err := daemon.IsRunning(sdir)
+			if err != nil {
+				fmt.Printf("Daemon:  unknown (%v)\n", err)
+			} else if running {
+				fmt.Printf("Daemon:  running (PID %d)\n", pid)
+			} else {
+				fmt.Println("Daemon:  not running")
+			}
+
+			// Hooks status.
+			settingsPath, err := config.SettingsPath()
+			if err == nil {
+				installed, _ := config.IsHooksInstalled(settingsPath, cfg.Server.Port)
+				if installed {
+					fmt.Println("Hooks:   installed")
+				} else {
+					fmt.Println("Hooks:   not installed")
+				}
+			}
+
+			// Server status (sessions).
+			if running {
+				url := adminURL(cfg.Server.Port, "/status")
+				client := &http.Client{Timeout: httpClientTimeout}
+				resp, err := client.Get(url)
+				if err == nil {
+					defer resp.Body.Close()
+					body, _ := io.ReadAll(resp.Body)
+					var status struct {
+						Sessions map[string]int `json:"sessions"`
+					}
+					if json.Unmarshal(body, &status) == nil {
+						fmt.Printf("Sessions: %d active\n", len(status.Sessions))
+					}
+				}
+			}
+
+			return nil
+		},
+	}
 }
 
 // newLogCmd creates the `squawk log` subcommand that reads and displays
 // recent entries from the action log file.
 func newLogCmd() *cobra.Command {
 	var tail int
-	var cfgPath string
 
 	cmd := &cobra.Command{
 		Use:   "log",
 		Short: "Display recent action log entries",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig(cfgPath)
+			cfg, _, err := loadConfigFromCmd(cmd)
 			if err != nil {
 				return err
 			}
 
-			entries, err := readLogEntries(cfg.LogFile, tail)
+			entries, err := action.ReadLogEntries(cfg.LogFile, tail)
 			if err != nil {
 				return err
 			}
@@ -638,42 +898,88 @@ func newLogCmd() *cobra.Command {
 	}
 
 	cmd.Flags().IntVar(&tail, "tail", 10, "number of recent entries to display")
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", configPath, "path to config file")
 	return cmd
 }
 
-// readLogEntries reads the last n entries from the JSON-lines log file.
-func readLogEntries(logFile string, n int) ([]action.LogEntry, error) {
-	f, err := os.Open(logFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to open log file %q: %w", logFile, err)
-	}
-	defer f.Close()
+// newStatsCmd creates the `squawk stats` subcommand that computes and
+// displays aggregated metrics from the action log.
+func newStatsCmd() *cobra.Command {
+	var (
+		since   string
+		asJSON  bool
+		project string
+	)
 
-	var all []action.LogEntry
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry action.LogEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue // skip malformed lines
-		}
-		all = append(all, entry)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read log file: %w", err)
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Display intervention statistics and metrics",
+		Long: `Compute and display aggregated metrics from squawk's action log,
+including intervention counts, estimated actions saved, per-project
+breakdowns, and top rules.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := loadConfigFromCmd(cmd)
+			if err != nil {
+				return err
+			}
+
+			entries, err := action.ReadLogEntries(cfg.LogFile, 0)
+			if err != nil {
+				return err
+			}
+
+			// Apply --since filter.
+			if since != "" {
+				d, err := parseDuration(since)
+				if err != nil {
+					return fmt.Errorf("invalid --since value %q: %w", since, err)
+				}
+				entries = stats.FilterSince(entries, time.Now().Add(-d))
+			}
+
+			// Apply --project filter.
+			if project != "" {
+				entries = stats.FilterProject(entries, project)
+			}
+
+			report := stats.Compute(entries)
+
+			if asJSON {
+				return stats.PrintJSON(os.Stdout, report)
+			}
+
+			stats.PrintReport(os.Stdout, report, project)
+			return nil
+		},
 	}
 
-	if len(all) <= n {
-		return all, nil
+	cmd.Flags().StringVar(&since, "since", "", "time window filter (e.g. 7d, 30d, 24h)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
+	cmd.Flags().StringVar(&project, "project", "", "filter to a specific project path")
+	return cmd
+}
+
+// parseDuration parses a duration string that supports days (e.g. "7d", "30d")
+// in addition to Go's standard duration format.
+func parseDuration(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		var days int
+		if _, err := fmt.Sscanf(s, "%dd", &days); err != nil {
+			return 0, fmt.Errorf("failed to parse days: %w", err)
+		}
+		if days <= 0 {
+			return 0, fmt.Errorf("days must be positive, got %d", days)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
 	}
-	return all[len(all)-n:], nil
+	return time.ParseDuration(s)
+}
+
+
+// loadConfigFromCmd reads the --config flag from the command and loads the config.
+func loadConfigFromCmd(cmd *cobra.Command) (*types.Config, string, error) {
+	cfgPath, _ := cmd.Flags().GetString("config")
+	cfg, err := loadConfig(cfgPath)
+	return cfg, cfgPath, err
 }
 
 // loadConfig loads the config from the given path, falling back to defaults

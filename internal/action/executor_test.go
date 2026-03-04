@@ -17,6 +17,17 @@ func newTestExecutor(t *testing.T) *Executor {
 	return NewExecutor(logger)
 }
 
+func newTestActionLogger(t *testing.T) *ActionLogger {
+	t.Helper()
+	logFile := filepath.Join(t.TempDir(), "actions.jsonl")
+	logger, err := NewActionLogger(logFile)
+	if err != nil {
+		t.Fatalf("failed to create action logger: %v", err)
+	}
+	t.Cleanup(func() { logger.Close() })
+	return logger
+}
+
 func makeMatch(actionType types.ActionType, message string, activityCount int) types.RuleMatch {
 	activities := make([]types.Activity, activityCount)
 	for i := range activities {
@@ -234,178 +245,168 @@ func TestExpandTemplateFileAndCommand(t *testing.T) {
 	}
 }
 
-func TestActionLogger(t *testing.T) {
-	t.Run("LogMatch writes entry to file", func(t *testing.T) {
-		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
-		logger, err := NewActionLogger(logFile)
-		if err != nil {
-			t.Fatalf("failed to create action logger: %v", err)
-		}
-		defer logger.Close()
+func TestLoggingExecutor(t *testing.T) {
+	t.Run("delegates to inner executor and logs action", func(t *testing.T) {
+		actionLogger := newTestActionLogger(t)
+		le := NewLoggingExecutor(newTestExecutor(t), actionLogger)
 
 		match := types.RuleMatch{
 			Rule: types.Rule{
-				Name:    "test-rule",
+				Name:    "test-logging",
 				Enabled: true,
 				Action:  types.Action{Type: types.ActionBlock, Message: "blocked"},
 			},
 			Activities: []types.Activity{
-				{Timestamp: time.Now(), SessionID: "s1"},
-				{Timestamp: time.Now(), SessionID: "s1"},
-			},
-			MatchedAt: time.Now(),
-		}
-
-		logger.LogMatch(match)
-
-		entries, err := logger.GetRecentLogs(10)
-		if err != nil {
-			t.Fatalf("failed to get recent logs: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 entry, got %d", len(entries))
-		}
-		if entries[0].RuleName != "test-rule" {
-			t.Errorf("rule_name = %q, want %q", entries[0].RuleName, "test-rule")
-		}
-		if entries[0].Action != "block" {
-			t.Errorf("action = %q, want %q", entries[0].Action, "block")
-		}
-		if entries[0].Message != "rule matched with 2 activities" {
-			t.Errorf("message = %q, want %q", entries[0].Message, "rule matched with 2 activities")
-		}
-	})
-
-	t.Run("LogAction writes response message", func(t *testing.T) {
-		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
-		logger, err := NewActionLogger(logFile)
-		if err != nil {
-			t.Fatalf("failed to create action logger: %v", err)
-		}
-		defer logger.Close()
-
-		match := types.RuleMatch{
-			Rule: types.Rule{
-				Name:    "inject-rule",
-				Enabled: true,
-				Action:  types.Action{Type: types.ActionInject, Message: "original message"},
-			},
-			Activities: []types.Activity{{Timestamp: time.Now(), SessionID: "s1"}},
-			MatchedAt:  time.Now(),
-		}
-
-		resp := &types.HookResponse{
-			AdditionalContext: "expanded inject message",
-		}
-		logger.LogAction(match, resp)
-
-		entries, err := logger.GetRecentLogs(10)
-		if err != nil {
-			t.Fatalf("failed to get recent logs: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 entry, got %d", len(entries))
-		}
-		if entries[0].Message != "expanded inject message" {
-			t.Errorf("message = %q, want %q", entries[0].Message, "expanded inject message")
-		}
-	})
-
-	t.Run("LogAction uses Reason when AdditionalContext is empty", func(t *testing.T) {
-		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
-		logger, err := NewActionLogger(logFile)
-		if err != nil {
-			t.Fatalf("failed to create action logger: %v", err)
-		}
-		defer logger.Close()
-
-		match := types.RuleMatch{
-			Rule: types.Rule{
-				Name:    "block-rule",
-				Enabled: true,
-				Action:  types.Action{Type: types.ActionBlock, Message: "original"},
-			},
-			Activities: []types.Activity{{Timestamp: time.Now(), SessionID: "s1"}},
-			MatchedAt:  time.Now(),
-		}
-
-		resp := &types.HookResponse{
-			Decision: "block",
-			Reason:   "expanded block reason",
-		}
-		logger.LogAction(match, resp)
-
-		entries, err := logger.GetRecentLogs(10)
-		if err != nil {
-			t.Fatalf("failed to get recent logs: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 entry, got %d", len(entries))
-		}
-		if entries[0].Message != "expanded block reason" {
-			t.Errorf("message = %q, want %q", entries[0].Message, "expanded block reason")
-		}
-	})
-
-	t.Run("LogAction with nil response uses action message", func(t *testing.T) {
-		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
-		logger, err := NewActionLogger(logFile)
-		if err != nil {
-			t.Fatalf("failed to create action logger: %v", err)
-		}
-		defer logger.Close()
-
-		match := types.RuleMatch{
-			Rule: types.Rule{
-				Name:    "log-rule",
-				Enabled: true,
-				Action:  types.Action{Type: types.ActionLog, Message: "the original message"},
-			},
-			MatchedAt: time.Now(),
-		}
-
-		logger.LogAction(match, nil)
-
-		entries, err := logger.GetRecentLogs(10)
-		if err != nil {
-			t.Fatalf("failed to get recent logs: %v", err)
-		}
-		if len(entries) != 1 {
-			t.Fatalf("expected 1 entry, got %d", len(entries))
-		}
-		if entries[0].Message != "the original message" {
-			t.Errorf("message = %q, want %q", entries[0].Message, "the original message")
-		}
-	})
-
-	t.Run("GetRecentLogs limits results", func(t *testing.T) {
-		logFile := filepath.Join(t.TempDir(), "actions.jsonl")
-		logger, err := NewActionLogger(logFile)
-		if err != nil {
-			t.Fatalf("failed to create action logger: %v", err)
-		}
-		defer logger.Close()
-
-		for i := 0; i < 5; i++ {
-			logger.LogMatch(types.RuleMatch{
-				Rule: types.Rule{
-					Name:   fmt.Sprintf("rule-%d", i),
-					Action: types.Action{Type: types.ActionLog, Message: "msg"},
+				{
+					Event: types.Event{
+						SessionID: "sess-1",
+						CWD:       "/Users/jacklin/Projects/cozydrop",
+						ToolName:  "Edit",
+						ToolInput: map[string]any{"file_path": "/src/main.go"},
+					},
+					Timestamp: time.Now(),
+					SessionID: "sess-1",
 				},
-				MatchedAt: time.Now(),
-			})
+				{
+					Event:     types.Event{SessionID: "sess-1"},
+					Timestamp: time.Now(),
+					SessionID: "sess-1",
+				},
+			},
+			MatchedAt: time.Now(),
 		}
 
-		entries, err := logger.GetRecentLogs(3)
+		resp, err := le.Execute(match)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp == nil || resp.Decision != "block" {
+			t.Fatalf("expected block response, got %+v", resp)
+		}
+
+		entries, err := actionLogger.GetRecentLogs(10)
 		if err != nil {
 			t.Fatalf("failed to get recent logs: %v", err)
 		}
-		if len(entries) != 3 {
-			t.Fatalf("expected 3 entries, got %d", len(entries))
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 log entry, got %d", len(entries))
 		}
-		// Should return the last 3 entries.
-		if entries[0].RuleName != "rule-2" {
-			t.Errorf("first entry = %q, want %q", entries[0].RuleName, "rule-2")
+		e := entries[0]
+		if e.RuleName != "test-logging" {
+			t.Errorf("rule_name = %q, want %q", e.RuleName, "test-logging")
+		}
+		if e.SessionID != "sess-1" {
+			t.Errorf("session_id = %q, want %q", e.SessionID, "sess-1")
+		}
+		if e.Project != "/Users/jacklin/Projects/cozydrop" {
+			t.Errorf("project = %q, want %q", e.Project, "/Users/jacklin/Projects/cozydrop")
+		}
+		if e.ActivityCount != 2 {
+			t.Errorf("activity_count = %d, want %d", e.ActivityCount, 2)
+		}
+		if e.ToolName != "Edit" {
+			t.Errorf("tool_name = %q, want %q", e.ToolName, "Edit")
+		}
+		if e.FilePath != "/src/main.go" {
+			t.Errorf("file_path = %q, want %q", e.FilePath, "/src/main.go")
 		}
 	})
+
+	t.Run("propagates executor errors without logging", func(t *testing.T) {
+		actionLogger := newTestActionLogger(t)
+		le := NewLoggingExecutor(newTestExecutor(t), actionLogger)
+
+		match := makeMatch("unknown", "should fail", 1)
+		_, err := le.Execute(match)
+		if err == nil {
+			t.Fatal("expected error for unsupported action type, got nil")
+		}
+
+		entries, err := actionLogger.GetRecentLogs(10)
+		if err != nil {
+			t.Fatalf("failed to get recent logs: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("expected 0 log entries on error, got %d", len(entries))
+		}
+	})
+}
+
+func TestActionLogger_LogAction(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    types.Rule
+		resp    *types.HookResponse
+		wantMsg string
+	}{
+		{
+			name: "uses AdditionalContext from response",
+			rule: types.Rule{Name: "inject-rule", Enabled: true,
+				Action: types.Action{Type: types.ActionInject, Message: "original message"}},
+			resp:    &types.HookResponse{AdditionalContext: "expanded inject message"},
+			wantMsg: "expanded inject message",
+		},
+		{
+			name: "uses Reason when AdditionalContext is empty",
+			rule: types.Rule{Name: "block-rule", Enabled: true,
+				Action: types.Action{Type: types.ActionBlock, Message: "original"}},
+			resp:    &types.HookResponse{Decision: "block", Reason: "expanded block reason"},
+			wantMsg: "expanded block reason",
+		},
+		{
+			name: "nil response uses action message",
+			rule: types.Rule{Name: "log-rule", Enabled: true,
+				Action: types.Action{Type: types.ActionLog, Message: "the original message"}},
+			resp:    nil,
+			wantMsg: "the original message",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := newTestActionLogger(t)
+			match := types.RuleMatch{
+				Rule:       tt.rule,
+				Activities: []types.Activity{{Timestamp: time.Now(), SessionID: "s1"}},
+				MatchedAt:  time.Now(),
+			}
+			logger.LogAction(match, tt.resp)
+
+			entries, err := logger.GetRecentLogs(10)
+			if err != nil {
+				t.Fatalf("failed to get recent logs: %v", err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("expected 1 entry, got %d", len(entries))
+			}
+			if entries[0].Message != tt.wantMsg {
+				t.Errorf("message = %q, want %q", entries[0].Message, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestActionLogger_GetRecentLogs(t *testing.T) {
+	logger := newTestActionLogger(t)
+
+	for i := 0; i < 5; i++ {
+		logger.LogAction(types.RuleMatch{
+			Rule: types.Rule{
+				Name:   fmt.Sprintf("rule-%d", i),
+				Action: types.Action{Type: types.ActionLog, Message: "msg"},
+			},
+			MatchedAt: time.Now(),
+		}, nil)
+	}
+
+	entries, err := logger.GetRecentLogs(3)
+	if err != nil {
+		t.Fatalf("failed to get recent logs: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	if entries[0].RuleName != "rule-2" {
+		t.Errorf("first entry = %q, want %q", entries[0].RuleName, "rule-2")
+	}
 }

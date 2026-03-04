@@ -6,22 +6,28 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/Jack-Lin-DS-AI/squawk/internal/types"
 )
 
-// mockEvaluator is a test double for RuleEvaluator.
+// --- Test doubles ---
+
 type mockEvaluator struct {
-	matches []types.RuleMatch
+	matches  []types.RuleMatch
+	replaced []types.Rule
 }
 
 func (m *mockEvaluator) Evaluate(_ []types.Activity, _ types.Event) []types.RuleMatch {
 	return m.matches
 }
 
-// mockExecutor is a test double for ActionExecutor.
+func (m *mockEvaluator) ReplaceRules(newRules []types.Rule) {
+	m.replaced = newRules
+}
+
 type mockExecutor struct {
 	calls []types.RuleMatch
 	resp  *types.HookResponse
@@ -33,7 +39,6 @@ func (m *mockExecutor) Execute(match types.RuleMatch) (*types.HookResponse, erro
 	return m.resp, m.err
 }
 
-// mockExecutorFunc is a test double that delegates to a function for per-call control.
 type mockExecutorFunc struct {
 	fn func(types.RuleMatch) (*types.HookResponse, error)
 }
@@ -42,16 +47,43 @@ func (m *mockExecutorFunc) Execute(match types.RuleMatch) (*types.HookResponse, 
 	return m.fn(match)
 }
 
-func newTestServer(evaluator RuleEvaluator) (*Server, *Tracker) {
+// --- Helpers ---
+
+func startTestServer(t *testing.T, evaluator RuleEvaluator, executors ...ActionExecutor) (*httptest.Server, *Tracker) {
+	t.Helper()
 	tracker := NewTracker(10 * time.Minute)
-	srv := NewServer(":0", tracker, evaluator, nil)
-	return srv, tracker
+	var exec ActionExecutor
+	if len(executors) > 0 {
+		exec = executors[0]
+	}
+	srv := NewServer(":0", "", tracker, evaluator, exec)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts, tracker
 }
 
-func newTestServerWithExecutor(evaluator RuleEvaluator, executor ActionExecutor) (*Server, *Tracker) {
-	tracker := NewTracker(10 * time.Minute)
-	srv := NewServer(":0", tracker, evaluator, executor)
-	return srv, tracker
+func makeMatch(name string, at types.ActionType, msg string) types.RuleMatch {
+	return types.RuleMatch{
+		Rule: types.Rule{
+			Name:    name,
+			Enabled: true,
+			Action:  types.Action{Type: at, Message: msg},
+		},
+		MatchedAt: time.Now(),
+	}
+}
+
+func makeEvent(sessionID, eventName, toolName string, input ...map[string]any) types.Event {
+	e := types.Event{
+		SessionID:     sessionID,
+		HookEventName: eventName,
+		ToolName:      toolName,
+		Timestamp:     time.Now(),
+	}
+	if len(input) > 0 {
+		e.ToolInput = input[0]
+	}
+	return e
 }
 
 func postJSON(t *testing.T, ts *httptest.Server, path string, body any) *http.Response {
@@ -77,22 +109,15 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 	return v
 }
 
+// --- Server Tests ---
+
 func TestServer(t *testing.T) {
 	t.Run("health endpoint", func(t *testing.T) {
-		srv, _ := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
+		ts, _ := startTestServer(t, &mockEvaluator{})
 		resp, err := ts.Client().Get(ts.URL + "/health")
 		if err != nil {
 			t.Fatalf("GET /health failed: %v", err)
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-		}
-
 		body := decodeJSON[map[string]string](t, resp)
 		if body["status"] != "ok" {
 			t.Errorf("status = %q, want %q", body["status"], "ok")
@@ -100,15 +125,11 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("status endpoint with no sessions", func(t *testing.T) {
-		srv, _ := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
+		ts, _ := startTestServer(t, &mockEvaluator{})
 		resp, err := ts.Client().Get(ts.URL + "/status")
 		if err != nil {
 			t.Fatalf("GET /status failed: %v", err)
 		}
-
 		body := decodeJSON[statusResponse](t, resp)
 		if len(body.Sessions) != 0 {
 			t.Errorf("sessions = %v, want empty", body.Sessions)
@@ -116,18 +137,8 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("post-tool-use records activity", func(t *testing.T) {
-		srv, tracker := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-1",
-			HookEventName: "PostToolUse",
-			ToolName:      "Edit",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		ts, tracker := startTestServer(t, &mockEvaluator{})
+		resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent("sess-1", "PostToolUse", "Edit"))
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
@@ -143,56 +154,21 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("pre-tool-use allows when no rules match", func(t *testing.T) {
-		srv, _ := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-2",
-			HookEventName: "PreToolUse",
-			ToolName:      "Read",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/pre-tool-use", event)
+		ts, _ := startTestServer(t, &mockEvaluator{})
+		resp := postJSON(t, ts, "/hooks/pre-tool-use", makeEvent("sess-2", "PreToolUse", "Read"))
 		body := decodeJSON[types.HookResponse](t, resp)
-
 		if body.Decision != "" {
 			t.Errorf("decision = %q, want empty (allow)", body.Decision)
 		}
 	})
 
 	t.Run("pre-tool-use blocks when block rule matches", func(t *testing.T) {
-		evaluator := &mockEvaluator{
-			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:        "block-dangerous-tool",
-						Description: "Block dangerous tool usage",
-						Enabled:     true,
-						Action: types.Action{
-							Type:    types.ActionBlock,
-							Message: "tool usage blocked by policy",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-			},
+		eval := &mockEvaluator{
+			matches: []types.RuleMatch{makeMatch("block-dangerous-tool", types.ActionBlock, "tool usage blocked by policy")},
 		}
-
-		srv, _ := newTestServer(evaluator)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-3",
-			HookEventName: "PreToolUse",
-			ToolName:      "Bash",
-			ToolInput:     map[string]any{"command": "rm -rf /"},
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/pre-tool-use", event)
+		ts, _ := startTestServer(t, eval)
+		resp := postJSON(t, ts, "/hooks/pre-tool-use",
+			makeEvent("sess-3", "PreToolUse", "Bash", map[string]any{"command": "rm -rf /"}))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.Decision != "block" {
@@ -204,62 +180,37 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("generic event handler records activity", func(t *testing.T) {
-		srv, tracker := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-4",
-			HookEventName: "Notification",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/event", event)
+		ts, tracker := startTestServer(t, &mockEvaluator{})
+		resp := postJSON(t, ts, "/hooks/event", makeEvent("sess-4", "Notification", ""))
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
 		resp.Body.Close()
 
-		activities := tracker.GetActivities("sess-4")
-		if len(activities) != 1 {
-			t.Fatalf("activity count = %d, want 1", len(activities))
+		if len(tracker.GetActivities("sess-4")) != 1 {
+			t.Fatal("expected 1 activity for sess-4")
 		}
 	})
 
 	t.Run("invalid JSON returns 400", func(t *testing.T) {
-		srv, _ := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
+		ts, _ := startTestServer(t, &mockEvaluator{})
 		resp, err := ts.Client().Post(
-			ts.URL+"/hooks/pre-tool-use",
-			"application/json",
+			ts.URL+"/hooks/pre-tool-use", "application/json",
 			bytes.NewReader([]byte(`{invalid`)),
 		)
 		if err != nil {
 			t.Fatalf("POST failed: %v", err)
 		}
 		defer resp.Body.Close()
-
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 		}
 	})
 
 	t.Run("status reflects recorded sessions", func(t *testing.T) {
-		srv, _ := newTestServer(&mockEvaluator{})
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		// Record events for two sessions.
+		ts, _ := startTestServer(t, &mockEvaluator{})
 		for _, sid := range []string{"sess-a", "sess-a", "sess-b"} {
-			event := types.Event{
-				SessionID:     sid,
-				HookEventName: "PostToolUse",
-				ToolName:      "Read",
-				Timestamp:     time.Now(),
-			}
-			resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+			resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent(sid, "PostToolUse", "Read"))
 			resp.Body.Close()
 		}
 
@@ -267,7 +218,6 @@ func TestServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /status failed: %v", err)
 		}
-
 		body := decodeJSON[statusResponse](t, resp)
 		if body.Sessions["sess-a"] != 2 {
 			t.Errorf("sess-a count = %d, want 2", body.Sessions["sess-a"])
@@ -278,83 +228,27 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("post-tool-use with non-block rule does not block", func(t *testing.T) {
-		evaluator := &mockEvaluator{
-			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "notify-frequent-edits",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionNotify,
-							Message: "lots of edits detected",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-			},
+		eval := &mockEvaluator{
+			matches: []types.RuleMatch{makeMatch("notify-frequent-edits", types.ActionNotify, "lots of edits detected")},
 		}
-
-		srv, _ := newTestServer(evaluator)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-5",
-			HookEventName: "PostToolUse",
-			ToolName:      "Edit",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		ts, _ := startTestServer(t, eval)
+		resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent("sess-5", "PostToolUse", "Edit"))
 		body := decodeJSON[types.HookResponse](t, resp)
-
-		// PostToolUse should always return an allow response.
 		if body.Decision != "" {
 			t.Errorf("decision = %q, want empty", body.Decision)
 		}
 	})
 
 	t.Run("post-tool-use calls executor for each match", func(t *testing.T) {
-		evaluator := &mockEvaluator{
+		eval := &mockEvaluator{
 			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "notify-edits",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionNotify,
-							Message: "edit detected",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-				{
-					Rule: types.Rule{
-						Name:    "log-edits",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionLog,
-							Message: "edit logged",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
+				makeMatch("notify-edits", types.ActionNotify, "edit detected"),
+				makeMatch("log-edits", types.ActionLog, "edit logged"),
 			},
 		}
-
 		exec := &mockExecutor{}
-		srv, _ := newTestServerWithExecutor(evaluator, exec)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-exec-1",
-			HookEventName: "PostToolUse",
-			ToolName:      "Edit",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		ts, _ := startTestServer(t, eval, exec)
+		resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent("sess-exec-1", "PostToolUse", "Edit"))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.Decision != "" {
@@ -372,41 +266,15 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("pre-tool-use block uses executor response", func(t *testing.T) {
-		evaluator := &mockEvaluator{
-			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "block-dangerous",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionBlock,
-							Message: "original message",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-			},
+		eval := &mockEvaluator{
+			matches: []types.RuleMatch{makeMatch("block-dangerous", types.ActionBlock, "original message")},
 		}
-
 		exec := &mockExecutor{
-			resp: &types.HookResponse{
-				Decision: "block",
-				Reason:   "expanded by executor",
-			},
+			resp: &types.HookResponse{Decision: "block", Reason: "expanded by executor"},
 		}
-		srv, _ := newTestServerWithExecutor(evaluator, exec)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-exec-2",
-			HookEventName: "PreToolUse",
-			ToolName:      "Bash",
-			ToolInput:     map[string]any{"command": "rm -rf /"},
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/pre-tool-use", event)
+		ts, _ := startTestServer(t, eval, exec)
+		resp := postJSON(t, ts, "/hooks/pre-tool-use",
+			makeEvent("sess-exec-2", "PreToolUse", "Bash", map[string]any{"command": "rm -rf /"}))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.Decision != "block" {
@@ -421,39 +289,14 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("post-tool-use inject match returns additionalContext", func(t *testing.T) {
-		evaluator := &mockEvaluator{
-			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "inject-guidance",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionInject,
-							Message: "you should read files first",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-			},
+		eval := &mockEvaluator{
+			matches: []types.RuleMatch{makeMatch("inject-guidance", types.ActionInject, "you should read files first")},
 		}
-
 		exec := &mockExecutor{
-			resp: &types.HookResponse{
-				AdditionalContext: "you should read files first",
-			},
+			resp: &types.HookResponse{AdditionalContext: "you should read files first"},
 		}
-		srv, _ := newTestServerWithExecutor(evaluator, exec)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-inject-1",
-			HookEventName: "PostToolUse",
-			ToolName:      "Edit",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		ts, _ := startTestServer(t, eval, exec)
+		resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent("sess-inject-1", "PostToolUse", "Edit"))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.Decision != "" {
@@ -468,98 +311,41 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("post-tool-use multiple matches returns first inject response", func(t *testing.T) {
-		evaluator := &mockEvaluator{
+		eval := &mockEvaluator{
 			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "log-only",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionLog,
-							Message: "just logging",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-				{
-					Rule: types.Rule{
-						Name:    "inject-first",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionInject,
-							Message: "first inject",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
+				makeMatch("log-only", types.ActionLog, "just logging"),
+				makeMatch("inject-first", types.ActionInject, "first inject"),
 			},
 		}
-
 		callCount := 0
-		// Use a custom executor that returns different responses per call.
 		customExec := &mockExecutorFunc{
 			fn: func(match types.RuleMatch) (*types.HookResponse, error) {
 				callCount++
 				if match.Rule.Action.Type == types.ActionInject {
-					return &types.HookResponse{
-						AdditionalContext: "injected context",
-					}, nil
+					return &types.HookResponse{AdditionalContext: "injected context"}, nil
 				}
-				return nil, nil // log action returns nil
+				return nil, nil
 			},
 		}
-		srv, _ := newTestServerWithExecutor(evaluator, customExec)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-inject-2",
-			HookEventName: "PostToolUse",
-			ToolName:      "Edit",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		ts, _ := startTestServer(t, eval, customExec)
+		resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent("sess-inject-2", "PostToolUse", "Edit"))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.AdditionalContext != "injected context" {
 			t.Errorf("additionalContext = %q, want %q", body.AdditionalContext, "injected context")
 		}
 		if callCount != 2 {
-			t.Errorf("executor was called %d times, want 2 (should execute all matches)", callCount)
+			t.Errorf("executor was called %d times, want 2", callCount)
 		}
 	})
 
 	t.Run("post-tool-use no inject returns empty response", func(t *testing.T) {
-		evaluator := &mockEvaluator{
-			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "log-match",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionLog,
-							Message: "logged",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-			},
+		eval := &mockEvaluator{
+			matches: []types.RuleMatch{makeMatch("log-match", types.ActionLog, "logged")},
 		}
-
-		exec := &mockExecutor{resp: nil} // log returns nil
-		srv, _ := newTestServerWithExecutor(evaluator, exec)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-inject-3",
-			HookEventName: "PostToolUse",
-			ToolName:      "Edit",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/post-tool-use", event)
+		exec := &mockExecutor{resp: nil}
+		ts, _ := startTestServer(t, eval, exec)
+		resp := postJSON(t, ts, "/hooks/post-tool-use", makeEvent("sess-inject-3", "PostToolUse", "Edit"))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.Decision != "" {
@@ -571,37 +357,12 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("pre-tool-use block falls back when executor errors", func(t *testing.T) {
-		evaluator := &mockEvaluator{
-			matches: []types.RuleMatch{
-				{
-					Rule: types.Rule{
-						Name:    "block-on-error",
-						Enabled: true,
-						Action: types.Action{
-							Type:    types.ActionBlock,
-							Message: "fallback reason",
-						},
-					},
-					MatchedAt: time.Now(),
-				},
-			},
+		eval := &mockEvaluator{
+			matches: []types.RuleMatch{makeMatch("block-on-error", types.ActionBlock, "fallback reason")},
 		}
-
-		exec := &mockExecutor{
-			err: fmt.Errorf("executor failed"),
-		}
-		srv, _ := newTestServerWithExecutor(evaluator, exec)
-		ts := httptest.NewServer(srv)
-		defer ts.Close()
-
-		event := types.Event{
-			SessionID:     "sess-exec-3",
-			HookEventName: "PreToolUse",
-			ToolName:      "Bash",
-			Timestamp:     time.Now(),
-		}
-
-		resp := postJSON(t, ts, "/hooks/pre-tool-use", event)
+		exec := &mockExecutor{err: fmt.Errorf("executor failed")}
+		ts, _ := startTestServer(t, eval, exec)
+		resp := postJSON(t, ts, "/hooks/pre-tool-use", makeEvent("sess-exec-3", "PreToolUse", "Bash"))
 		body := decodeJSON[types.HookResponse](t, resp)
 
 		if body.Decision != "block" {
@@ -613,17 +374,88 @@ func TestServer(t *testing.T) {
 	})
 }
 
+// --- Reload Rules Tests ---
+
+func startReloadTestServer(t *testing.T, rulesDir string) (*httptest.Server, *mockEvaluator) {
+	t.Helper()
+	eval := &mockEvaluator{}
+	tracker := NewTracker(10 * time.Minute)
+	srv := NewServer(":0", rulesDir, tracker, eval, nil)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts, eval
+}
+
+func TestReloadRules(t *testing.T) {
+	t.Run("reload with valid rulesDir", func(t *testing.T) {
+		dir := t.TempDir()
+		ruleYAML := `rules:
+  - name: test-reload-rule
+    enabled: true
+    trigger:
+      conditions:
+        - event: PostToolUse
+          count: 1
+    action:
+      type: log
+      message: test
+`
+		if err := os.WriteFile(dir+"/reload.yaml", []byte(ruleYAML), 0o644); err != nil {
+			t.Fatalf("failed to write rule file: %v", err)
+		}
+
+		ts, eval := startReloadTestServer(t, dir)
+
+		resp, err := ts.Client().Post(ts.URL+"/admin/reload-rules", "", nil)
+		if err != nil {
+			t.Fatalf("POST /admin/reload-rules failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		if len(eval.replaced) != 1 {
+			t.Errorf("eval.replaced count = %d, want 1", len(eval.replaced))
+		}
+		if len(eval.replaced) > 0 && eval.replaced[0].Name != "test-reload-rule" {
+			t.Errorf("rule name = %q, want %q", eval.replaced[0].Name, "test-reload-rule")
+		}
+	})
+
+	t.Run("reload with no rulesDir returns 400", func(t *testing.T) {
+		ts, _ := startReloadTestServer(t, "")
+
+		resp, err := ts.Client().Post(ts.URL+"/admin/reload-rules", "", nil)
+		if err != nil {
+			t.Fatalf("POST /admin/reload-rules failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("reload with invalid rulesDir returns 500", func(t *testing.T) {
+		ts, _ := startReloadTestServer(t, "/nonexistent/path")
+
+		resp, err := ts.Client().Post(ts.URL+"/admin/reload-rules", "", nil)
+		if err != nil {
+			t.Fatalf("POST /admin/reload-rules failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+		}
+	})
+}
+
+// --- Tracker Tests ---
+
 func TestTracker(t *testing.T) {
 	t.Run("records and retrieves activities", func(t *testing.T) {
 		tracker := NewTracker(10 * time.Minute)
-
-		event := types.Event{
-			SessionID:     "s1",
-			HookEventName: "PostToolUse",
-			ToolName:      "Bash",
-			Timestamp:     time.Now(),
-		}
-		tracker.Record(event)
+		tracker.Record(makeEvent("s1", "PostToolUse", "Bash"))
 
 		activities := tracker.GetActivities("s1")
 		if len(activities) != 1 {
@@ -636,9 +468,8 @@ func TestTracker(t *testing.T) {
 
 	t.Run("filters by session", func(t *testing.T) {
 		tracker := NewTracker(10 * time.Minute)
-
-		tracker.Record(types.Event{SessionID: "s1", Timestamp: time.Now()})
-		tracker.Record(types.Event{SessionID: "s2", Timestamp: time.Now()})
+		tracker.Record(makeEvent("s1", "", ""))
+		tracker.Record(makeEvent("s2", "", ""))
 
 		if len(tracker.GetActivities("s1")) != 1 {
 			t.Error("expected 1 activity for s1")
@@ -654,43 +485,15 @@ func TestTracker(t *testing.T) {
 	t.Run("cleans up old activities", func(t *testing.T) {
 		tracker := NewTracker(5 * time.Minute)
 
-		// Record an old event.
-		oldEvent := types.Event{
-			SessionID: "s1",
-			Timestamp: time.Now().Add(-10 * time.Minute),
-		}
+		oldEvent := types.Event{SessionID: "s1", Timestamp: time.Now().Add(-10 * time.Minute)}
 		tracker.Record(oldEvent)
 
-		// Record a recent event which triggers cleanup.
-		recentEvent := types.Event{
-			SessionID: "s1",
-			Timestamp: time.Now(),
-		}
+		recentEvent := types.Event{SessionID: "s1", Timestamp: time.Now()}
 		tracker.Record(recentEvent)
 
 		activities := tracker.GetActivities("s1")
 		if len(activities) != 1 {
 			t.Fatalf("count = %d, want 1 (old should be cleaned)", len(activities))
-		}
-	})
-
-	t.Run("GetActivitiesSince filters by time", func(t *testing.T) {
-		tracker := NewTracker(1 * time.Hour)
-
-		now := time.Now()
-		tracker.Record(types.Event{SessionID: "s1", ToolName: "A", Timestamp: now.Add(-30 * time.Minute)})
-		tracker.Record(types.Event{SessionID: "s1", ToolName: "B", Timestamp: now.Add(-10 * time.Minute)})
-		tracker.Record(types.Event{SessionID: "s1", ToolName: "C", Timestamp: now})
-
-		activities := tracker.GetActivitiesSince("s1", now.Add(-15*time.Minute))
-		if len(activities) != 2 {
-			t.Fatalf("count = %d, want 2", len(activities))
-		}
-		if activities[0].Event.ToolName != "B" {
-			t.Errorf("first = %q, want %q", activities[0].Event.ToolName, "B")
-		}
-		if activities[1].Event.ToolName != "C" {
-			t.Errorf("second = %q, want %q", activities[1].Event.ToolName, "C")
 		}
 	})
 }

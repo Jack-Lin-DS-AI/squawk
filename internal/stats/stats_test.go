@@ -94,11 +94,37 @@ func TestCompute(t *testing.T) {
 			wantTopRuleName:    "legacy-rule",
 			wantProjectCount:   0,
 		},
+		{
+			name: "daemon_start excluded from interventions",
+			entries: []action.LogEntry{
+				makeEntry("", action.DaemonStartAction, "", "", 0, now.Add(-72*time.Hour)),
+				makeEntry("rule-a", "block", "s1", "/projects/foo", 3, now),
+			},
+			wantInterventions:  1,
+			wantSessions:       1,
+			wantActiveDays:     4, // 3 days span + 1 (inclusive)
+			wantEstimatedSaved: 6, // 3 + 3
+			wantByAction:       map[string]int{"block": 1},
+			wantTopRuleName:    "rule-a",
+			wantProjectCount:   1,
+		},
+		{
+			name: "daemon_start only — no interventions but days counted",
+			entries: []action.LogEntry{
+				makeEntry("", action.DaemonStartAction, "", "", 0, now.Add(-48*time.Hour)),
+			},
+			wantInterventions:  0,
+			wantSessions:       0,
+			wantActiveDays:     3, // 2 days span + 1
+			wantEstimatedSaved: 0,
+			wantByAction:       map[string]int{},
+			wantProjectCount:   0,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			report := Compute(tt.entries)
+			report := ComputeAt(tt.entries, now)
 
 			if report.Interventions != tt.wantInterventions {
 				t.Errorf("Interventions = %d, want %d", report.Interventions, tt.wantInterventions)
@@ -127,6 +153,64 @@ func TestCompute(t *testing.T) {
 
 			if len(report.ByProject) != tt.wantProjectCount {
 				t.Errorf("project count = %d, want %d", len(report.ByProject), tt.wantProjectCount)
+			}
+		})
+	}
+}
+
+func TestFileHotspots(t *testing.T) {
+	now := time.Now()
+	entries := []action.LogEntry{
+		{Timestamp: now, RuleName: "r1", Action: "block", FilePath: "/src/main.go", ActivityCount: 2},
+		{Timestamp: now, RuleName: "r1", Action: "inject", FilePath: "/src/main.go", ActivityCount: 2},
+		{Timestamp: now, RuleName: "r2", Action: "block", FilePath: "/src/server.go", ActivityCount: 1},
+		{Timestamp: now, RuleName: "r1", Action: "block", FilePath: "", ActivityCount: 1}, // no file
+	}
+
+	report := ComputeAt(entries, now)
+
+	if len(report.FileHotspots) != 2 {
+		t.Fatalf("FileHotspots count = %d, want 2", len(report.FileHotspots))
+	}
+	// Sorted descending by count.
+	if report.FileHotspots[0].Path != "/src/main.go" || report.FileHotspots[0].Count != 2 {
+		t.Errorf("FileHotspots[0] = %+v, want {/src/main.go, 2}", report.FileHotspots[0])
+	}
+	if report.FileHotspots[1].Path != "/src/server.go" || report.FileHotspots[1].Count != 1 {
+		t.Errorf("FileHotspots[1] = %+v, want {/src/server.go, 1}", report.FileHotspots[1])
+	}
+
+	// daemon_start entries should not appear in hotspots (even with a file path).
+	entriesWithStart := make([]action.LogEntry, len(entries))
+	copy(entriesWithStart, entries)
+	entriesWithStart = append(entriesWithStart, action.LogEntry{
+		Timestamp: now.Add(-24 * time.Hour), Action: action.DaemonStartAction, FilePath: "/src/should-not-appear.go",
+	})
+	report2 := ComputeAt(entriesWithStart, now)
+	if len(report2.FileHotspots) != 2 {
+		t.Errorf("FileHotspots with daemon_start = %d, want 2", len(report2.FileHotspots))
+	}
+}
+
+func TestCalendarDays(t *testing.T) {
+	base := time.Date(2025, 3, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		from time.Time
+		to   time.Time
+		want int
+	}{
+		{"same instant", base, base, 0},
+		{"same day different times", base, base.Add(6 * time.Hour), 0},
+		{"next day", base, base.Add(36 * time.Hour), 2},
+		{"3 days apart", base, base.Add(72 * time.Hour), 3},
+		{"to before from", base, base.Add(-48 * time.Hour), 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calendarDays(tt.from, tt.to)
+			if got != tt.want {
+				t.Errorf("calendarDays() = %d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -177,6 +261,10 @@ func TestPrintReport(t *testing.T) {
 			"/projects/foo": {Sessions: 6, Interventions: 15, EstimatedActionsSaved: 45},
 			"/projects/bar": {Sessions: 4, Interventions: 10, EstimatedActionsSaved: 30},
 		},
+		FileHotspots: []FileHotspot{
+			{Path: "/src/main.go", Count: 8},
+			{Path: "/src/server.go", Count: 4},
+		},
 	}
 
 	var buf bytes.Buffer
@@ -196,6 +284,9 @@ func TestPrintReport(t *testing.T) {
 		"Top Rules",
 		"rule-a",
 		"rule-b",
+		"File Hotspots",
+		"/src/main.go",
+		"/src/server.go",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("output missing %q", want)

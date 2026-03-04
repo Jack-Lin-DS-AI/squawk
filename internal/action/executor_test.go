@@ -386,6 +386,29 @@ func TestActionLogger_LogAction(t *testing.T) {
 	}
 }
 
+func TestActionLogger_LogDaemonStart(t *testing.T) {
+	logger := newTestActionLogger(t)
+	logger.LogDaemonStart()
+
+	entries, err := logger.GetRecentLogs(10)
+	if err != nil {
+		t.Fatalf("failed to get recent logs: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != DaemonStartAction {
+		t.Errorf("action = %q, want %q", e.Action, DaemonStartAction)
+	}
+	if e.Message != "Squawk daemon started" {
+		t.Errorf("message = %q, want %q", e.Message, "Squawk daemon started")
+	}
+	if e.Timestamp.IsZero() {
+		t.Error("timestamp should not be zero")
+	}
+}
+
 func TestActionLogger_GetRecentLogs(t *testing.T) {
 	logger := newTestActionLogger(t)
 

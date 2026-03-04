@@ -47,6 +47,19 @@ func NewActionLogger(logFile string) (*ActionLogger, error) {
 	}, nil
 }
 
+// DaemonStartAction is the action string for daemon start log entries.
+const DaemonStartAction = "daemon_start"
+
+// LogDaemonStart writes a daemon_start entry to mark the beginning of a
+// monitoring period. This is used by stats to compute the total monitoring span.
+func (l *ActionLogger) LogDaemonStart() {
+	l.write(LogEntry{
+		Timestamp: time.Now(),
+		Action:    DaemonStartAction,
+		Message:   "Squawk daemon started",
+	})
+}
+
 // LogAction records the action taken for a rule match along with the response
 // returned to Claude Code.
 func (l *ActionLogger) LogAction(match types.RuleMatch, response *types.HookResponse) {

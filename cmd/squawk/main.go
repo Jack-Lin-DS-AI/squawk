@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -188,12 +189,19 @@ func newWatchCmd() *cobra.Command {
 			addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 			srv := monitor.NewServer(addr, cfg.RulesDir, tracker, engine, executor)
 
+			// Bind port before logging start to avoid spurious entries on failure.
+			listener, err := net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("failed to listen on %s: %w", addr, err)
+			}
+
+			actionLogger.LogDaemonStart()
+
 			fmt.Printf("Starting squawk on %s...\n", addr)
 			fmt.Printf("Loaded %d rule(s) from %s\n", len(loadedRules), cfg.RulesDir)
 
 			// Set up graceful shutdown on SIGINT/SIGTERM.
 			httpServer := &http.Server{
-				Addr:         addr,
 				Handler:      srv,
 				ReadTimeout:  gracefulStopTimeout,
 				WriteTimeout: gracefulStopTimeout,
@@ -202,7 +210,7 @@ func newWatchCmd() *cobra.Command {
 
 			errCh := make(chan error, 1)
 			go func() {
-				if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					errCh <- fmt.Errorf("server error: %w", err)
 				}
 				close(errCh)
@@ -847,9 +855,25 @@ func newStatusCmd() *cobra.Command {
 						Sessions map[string]int `json:"sessions"`
 					}
 					if json.Unmarshal(body, &status) == nil {
-						fmt.Printf("Sessions: %d active\n", len(status.Sessions))
+						fmt.Printf("Sessions:%d active\n", len(status.Sessions))
 					}
 				}
+			}
+
+			// Rules status.
+			loadedRules, err := rules.LoadRules(cfg.RulesDir)
+			if err != nil {
+				fmt.Printf("Rules:   error (%v)\n", err)
+			} else if len(loadedRules) == 0 {
+				fmt.Println("Rules:   none loaded")
+			} else {
+				var enabled int
+				for _, r := range loadedRules {
+					if r.Enabled {
+						enabled++
+					}
+				}
+				fmt.Printf("Rules:   %d enabled / %d total\n", enabled, len(loadedRules))
 			}
 
 			return nil

@@ -24,6 +24,7 @@ type Report struct {
 	ByAction             map[string]int           `json:"by_action"`
 	ByRule               []RuleCount              `json:"by_rule"`
 	ByProject            map[string]ProjectReport `json:"by_project"`
+	FileHotspots         []FileHotspot            `json:"file_hotspots"`
 }
 
 // ProjectReport holds per-project metrics.
@@ -39,38 +40,66 @@ type RuleCount struct {
 	Count int    `json:"count"`
 }
 
-// Compute aggregates log entries into a Report. Entries may optionally be
-// pre-filtered by the caller (e.g. by time window or project).
+// FileHotspot pairs a file path with its intervention count.
+type FileHotspot struct {
+	Path  string `json:"path"`
+	Count int    `json:"count"`
+}
+
+// Compute aggregates log entries into a Report using time.Now() as the
+// reference time for computing the monitoring span.
 func Compute(entries []action.LogEntry) Report {
+	return ComputeAt(entries, time.Now())
+}
+
+// ComputeAt aggregates log entries into a Report. The now parameter is the
+// reference time used to compute ActiveDays (span from earliest entry to now).
+// Entries may optionally be pre-filtered by the caller (e.g. by time window
+// or project).
+func ComputeAt(entries []action.LogEntry, now time.Time) Report {
 	r := Report{
 		ByAction:  make(map[string]int),
 		ByProject: make(map[string]ProjectReport),
-		ByRule:    []RuleCount{},
+		ByRule:        []RuleCount{},
+		FileHotspots: []FileHotspot{},
 	}
 
 	if len(entries) == 0 {
 		return r
 	}
 
-	days := make(map[string]struct{})
+	var earliest time.Time
 	sessions := make(map[string]struct{})
 	ruleCounts := make(map[string]int)
+	fileCounts := make(map[string]int)
 	projectSessions := make(map[string]map[string]struct{}) // project -> set of sessions
 
 	for _, e := range entries {
+		// Track earliest timestamp across all entries (including daemon_start).
+		if earliest.IsZero() || e.Timestamp.Before(earliest) {
+			earliest = e.Timestamp
+		}
+
+		// Skip daemon_start entries for intervention statistics.
+		if e.Action == action.DaemonStartAction {
+			continue
+		}
+
 		saved := estimateSaved(e)
 
 		r.Interventions++
 		r.ByAction[e.Action]++
 		r.EstimatedActionsSaved += saved
 
-		days[e.Timestamp.Format("2006-01-02")] = struct{}{}
-
 		if e.SessionID != "" {
 			sessions[e.SessionID] = struct{}{}
 		}
 
 		ruleCounts[e.RuleName]++
+
+		if e.FilePath != "" {
+			fileCounts[e.FilePath]++
+		}
 
 		if e.Project != "" {
 			pr := r.ByProject[e.Project]
@@ -87,7 +116,10 @@ func Compute(entries []action.LogEntry) Report {
 		}
 	}
 
-	r.ActiveDays = len(days)
+	// ActiveDays = calendar days from earliest entry to now, inclusive.
+	if !earliest.IsZero() {
+		r.ActiveDays = calendarDays(earliest, now) + 1
+	}
 	r.Sessions = len(sessions)
 
 	// Populate per-project session counts.
@@ -108,7 +140,32 @@ func Compute(entries []action.LogEntry) Report {
 		return r.ByRule[i].Name < r.ByRule[j].Name
 	})
 
+	// Build sorted file hotspots (descending).
+	for path, count := range fileCounts {
+		r.FileHotspots = append(r.FileHotspots, FileHotspot{Path: path, Count: count})
+	}
+	sort.Slice(r.FileHotspots, func(i, j int) bool {
+		if r.FileHotspots[i].Count != r.FileHotspots[j].Count {
+			return r.FileHotspots[i].Count > r.FileHotspots[j].Count
+		}
+		return r.FileHotspots[i].Path < r.FileHotspots[j].Path
+	})
+
 	return r
+}
+
+// calendarDays returns the number of calendar days between two timestamps
+// using UTC dates. Times within the same UTC calendar day return 0.
+func calendarDays(from, to time.Time) int {
+	fy, fm, fd := from.UTC().Date()
+	ty, tm, td := to.UTC().Date()
+	fromDate := time.Date(fy, fm, fd, 0, 0, 0, 0, time.UTC)
+	toDate := time.Date(ty, tm, td, 0, 0, 0, 0, time.UTC)
+	days := int(toDate.Sub(fromDate) / (24 * time.Hour))
+	if days < 0 {
+		return 0
+	}
+	return days
 }
 
 // estimateSaved returns an estimated number of wasted actions prevented by
@@ -250,6 +307,18 @@ func PrintReport(w io.Writer, report Report, projectFilter string) {
 		}
 		for i, rc := range report.ByRule[:limit] {
 			fmt.Fprintf(w, "    %2d. %-35s %d\n", i+1, rc.Name, rc.Count)
+		}
+	}
+
+	// File Hotspots.
+	if len(report.FileHotspots) > 0 {
+		fmt.Fprintf(w, "\n  File Hotspots\n")
+		limit := len(report.FileHotspots)
+		if limit > 10 {
+			limit = 10
+		}
+		for _, fh := range report.FileHotspots[:limit] {
+			fmt.Fprintf(w, "    %-50s %d\n", fh.Path, fh.Count)
 		}
 	}
 

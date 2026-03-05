@@ -47,4 +47,4 @@ brews:
     install: |
       bin.install "squawk"
     test: |
-      system "#{bin}/squawk", "version"
+      system "#{bin}/squawk", "--version"

@@ -11,10 +11,6 @@ tool usage via hooks and detects behavioral anti-patterns that emerge across
 multiple actions over time — loops, oscillation, escalating bad habits — that
 no single-event hook can catch.
 
-<p align="center">
-  <img src="demo.gif" alt="Squawk demo" width="800">
-</p>
-
 ## Why Squawk?
 
 AI coding agents can fall into repetitive loops: editing tests without reading

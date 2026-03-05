@@ -1,0 +1,50 @@
+version: 2
+
+project_name: squawk
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/squawk
+    binary: squawk
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^ci:"
+      - "^test:"
+
+release:
+  github:
+    owner: Jack-Lin-DS-AI
+    name: squawk
+
+brews:
+  - repository:
+      owner: Jack-Lin-DS-AI
+      name: homebrew-tap
+    homepage: https://github.com/Jack-Lin-DS-AI/squawk
+    description: Stateful behavioral pattern detection for AI coding agents
+    license: MIT
+    install: |
+      bin.install "squawk"
+    test: |
+      system "#{bin}/squawk", "version"

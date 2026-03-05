@@ -11,6 +11,10 @@ tool usage via hooks and detects behavioral anti-patterns that emerge across
 multiple actions over time — loops, oscillation, escalating bad habits — that
 no single-event hook can catch.
 
+<p align="center">
+  <img src="demo.gif" alt="Squawk demo" width="800">
+</p>
+
 ## Why Squawk?
 
 AI coding agents can fall into repetitive loops: editing tests without reading
@@ -22,10 +26,26 @@ intervenes — blocking destructive loops or injecting corrective context. Unlik
 single-event hooks, squawk tracks state over time to catch patterns that emerge
 across multiple tool calls.
 
-## Quick Start
+## Install
+
+**Homebrew** (macOS/Linux):
+
+```bash
+brew install Jack-Lin-DS-AI/tap/squawk
+```
+
+**Binary download**: grab the latest archive from
+[Releases](https://github.com/Jack-Lin-DS-AI/squawk/releases) and place `squawk` on your `PATH`.
+
+**Go install**:
 
 ```bash
 go install github.com/Jack-Lin-DS-AI/squawk/cmd/squawk@latest
+```
+
+## Quick Start
+
+```bash
 cd your-project && squawk setup
 ```
 

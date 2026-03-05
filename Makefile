@@ -2,7 +2,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 
 .DEFAULT_GOAL := all
 
-.PHONY: all build test cover lint fmt install clean
+.PHONY: all build test cover lint fmt install clean release-dry-run
 
 all: fmt lint test build
 
@@ -29,3 +29,6 @@ install:
 
 clean:
 	rm -f squawk coverage.out
+
+release-dry-run:
+	goreleaser release --snapshot --clean

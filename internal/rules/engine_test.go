@@ -737,22 +737,22 @@ func TestCooldown_MatchThenSuppressThenMatchAgain(t *testing.T) {
 		makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
 	}
 
-	// First evaluation: should match.
-	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	// First evaluation (PreToolUse): should match and set cooldown.
+	matches := engine.Evaluate(activities, types.Event{HookEventName: "PreToolUse", Timestamp: now})
 	if len(matches) != 1 {
 		t.Fatalf("first eval: expected 1 match, got %d", len(matches))
 	}
 
 	// Second evaluation 10s later: within cooldown, should NOT match.
 	activities = append(activities, makeActivity("PostToolUse", "Bash", nil, now.Add(5*time.Second), "s1"))
-	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(10 * time.Second)})
+	matches = engine.Evaluate(activities, types.Event{HookEventName: "PreToolUse", Timestamp: now.Add(10 * time.Second)})
 	if len(matches) != 0 {
 		t.Fatalf("during cooldown: expected 0 matches, got %d", len(matches))
 	}
 
 	// Third evaluation 31s later: cooldown expired, should match again.
 	activities = append(activities, makeActivity("PostToolUse", "Bash", nil, now.Add(30*time.Second), "s1"))
-	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(31 * time.Second)})
+	matches = engine.Evaluate(activities, types.Event{HookEventName: "PreToolUse", Timestamp: now.Add(31 * time.Second)})
 	if len(matches) != 1 {
 		t.Fatalf("after cooldown: expected 1 match, got %d", len(matches))
 	}
@@ -772,14 +772,14 @@ func TestCooldown_DoesNotAffectOtherRules(t *testing.T) {
 		makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
 	}
 
-	// First evaluation: both should match.
-	matches := engine.Evaluate(activities, types.Event{Timestamp: now})
+	// First evaluation (PreToolUse so block cooldown is set): both should match.
+	matches := engine.Evaluate(activities, types.Event{HookEventName: "PreToolUse", Timestamp: now})
 	if len(matches) != 2 {
 		t.Fatalf("first eval: expected 2 matches, got %d", len(matches))
 	}
 
 	// Second evaluation 10s later: rule-a in cooldown, rule-b should still match.
-	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(10 * time.Second)})
+	matches = engine.Evaluate(activities, types.Event{HookEventName: "PreToolUse", Timestamp: now.Add(10 * time.Second)})
 	if len(matches) != 1 {
 		t.Fatalf("during cooldown: expected 1 match, got %d", len(matches))
 	}
@@ -827,6 +827,46 @@ func TestCooldown_ExactExpiry(t *testing.T) {
 	matches = engine.Evaluate(activities, types.Event{Timestamp: now.Add(30 * time.Second)})
 	if len(matches) != 1 {
 		t.Fatalf("at exact expiry: expected 1 match, got %d", len(matches))
+	}
+}
+
+func TestCooldown_BlockSkipsCooldownOnPostToolUse(t *testing.T) {
+	now := time.Now()
+	rule := makeRule("block-cooldown", []types.Condition{
+		{Event: "PostToolUse", Tool: "Edit", Count: 3, Within: "5m"},
+	}, withAction(types.ActionBlock, "blocked"), withCooldown("30s"))
+	engine := NewEngine([]types.Rule{rule})
+
+	activities := nActivities(3, "PostToolUse", "Edit", fileInput("/a_test.go"), time.Second, now)
+
+	// Evaluate with a PostToolUse event: rule matches but cooldown should NOT
+	// be set because block actions can't execute on PostToolUse.
+	matches := engine.Evaluate(activities, types.Event{
+		HookEventName: "PostToolUse",
+		Timestamp:     now,
+	})
+	if len(matches) != 1 {
+		t.Fatalf("PostToolUse eval: expected 1 match, got %d", len(matches))
+	}
+
+	// Immediately evaluate with a PreToolUse event: should still match because
+	// no cooldown was set by the PostToolUse evaluation.
+	matches = engine.Evaluate(activities, types.Event{
+		HookEventName: "PreToolUse",
+		Timestamp:     now.Add(1 * time.Second),
+	})
+	if len(matches) != 1 {
+		t.Fatalf("PreToolUse eval: expected 1 match (no cooldown), got %d", len(matches))
+	}
+
+	// Now cooldown IS set (from the PreToolUse). Next PreToolUse within 30s
+	// should be suppressed.
+	matches = engine.Evaluate(activities, types.Event{
+		HookEventName: "PreToolUse",
+		Timestamp:     now.Add(10 * time.Second),
+	})
+	if len(matches) != 0 {
+		t.Fatalf("during cooldown: expected 0 matches, got %d", len(matches))
 	}
 }
 

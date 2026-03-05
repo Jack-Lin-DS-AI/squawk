@@ -94,9 +94,13 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 		}
 	}
 
-	// Record cooldown expiry for this rule.
+	// Record cooldown expiry for this rule — but only when the action can
+	// actually be enforced. Block actions only take effect on PreToolUse;
+	// setting cooldown on PostToolUse would waste it on a no-op.
 	if rule.Action.Cooldown != "" {
-		if d, err := time.ParseDuration(rule.Action.Cooldown); err == nil {
+		if rule.Action.Type == types.ActionBlock && currentEvent.HookEventName != "PreToolUse" {
+			// Skip cooldown — block wasn't enforced.
+		} else if d, err := time.ParseDuration(rule.Action.Cooldown); err == nil {
 			e.cooldowns[rule.Name] = currentEvent.Timestamp.Add(d)
 		}
 	}

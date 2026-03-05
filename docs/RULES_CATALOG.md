@@ -36,16 +36,17 @@ that stateless hooks cannot see.
 
 | Field | Value |
 |-------|-------|
-| **Technique** | CNT + ABS (3 cross-correlated conditions) |
+| **Technique** | CNT + ABS + SRC (3 cross-correlated conditions with source_of) |
 | **Severity** | CRITICAL |
 | **Action** | block (30s cooldown) |
 
 **Trigger (AND logic, all within 5 minutes):**
 1. Edit/Write on test files (`*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js`) — count >= 3
-2. Read/Glob/Grep on ANY file — count < 1 (negated: no exploration happened)
+2. Read/Grep/Glob of the **corresponding source files** (via `source_of: 0`) — count < 1 (negated: no related source exploration)
 3. Edit/Write on NON-test files — count < 1 (negated: no source code changes)
 
-**Resets when:** Agent reads any file OR edits a non-test file.
+**Resets when:** Agent reads the corresponding source file (e.g., `calc.go` for `calc_test.go`) OR edits a non-test file.
+Reading unrelated files does NOT reset the counter.
 
 ---
 

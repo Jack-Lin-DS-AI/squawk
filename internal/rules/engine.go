@@ -75,7 +75,7 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 	switch rule.Trigger.Logic {
 	case "or":
 		for _, cond := range rule.Trigger.Conditions {
-			matched, ok := evaluateCondition(cond, activities, activities, currentEvent)
+			matched, ok := evaluateCondition(cond, activities, activities, currentEvent, nil)
 			if ok {
 				allMatched = appendUnique(allMatched, matched)
 			}
@@ -85,11 +85,20 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 		}
 
 	default: // "and"
-		for _, cond := range rule.Trigger.Conditions {
-			matched, ok := evaluateCondition(cond, activities, activities, currentEvent)
+		condMatched := make([][]types.Activity, len(rule.Trigger.Conditions))
+		for i, cond := range rule.Trigger.Conditions {
+			var sourceFiles []string
+			if cond.SourceOf != nil {
+				ref := *cond.SourceOf
+				if ref >= 0 && ref < i {
+					sourceFiles = deriveSourceFiles(condMatched[ref])
+				}
+			}
+			matched, ok := evaluateCondition(cond, activities, activities, currentEvent, sourceFiles)
 			if !ok {
 				return types.RuleMatch{}, false
 			}
+			condMatched[i] = matched
 			allMatched = appendUnique(allMatched, matched)
 		}
 	}
@@ -115,7 +124,9 @@ func (e *Engine) evaluateRule(rule types.Rule, activities []types.Activity, curr
 // evaluateCondition checks a single condition against the activity history.
 // For negated conditions, it returns true when the condition is NOT met.
 // allActivities is the unfiltered set, needed by known_file hash mode.
-func evaluateCondition(cond types.Condition, activities, allActivities []types.Activity, currentEvent types.Event) ([]types.Activity, bool) {
+// sourceFiles, when non-nil, restricts matches to activities targeting those
+// specific file paths (derived from a referenced condition via source_of).
+func evaluateCondition(cond types.Condition, activities, allActivities []types.Activity, currentEvent types.Event, sourceFiles []string) ([]types.Activity, bool) {
 	// Determine the time window.
 	window := time.Duration(0)
 	if cond.Within != "" {
@@ -140,6 +151,11 @@ func evaluateCondition(cond types.Condition, activities, allActivities []types.A
 			continue
 		}
 		matched = append(matched, act)
+	}
+
+	// Apply source file filter if source_of derived file paths are provided.
+	if len(sourceFiles) > 0 {
+		matched = sourceFileFilter(matched, sourceFiles)
 	}
 
 	// Apply hash filter if hash_mode is set.
@@ -389,6 +405,102 @@ func commandHash(act types.Activity) uint64 {
 	cmd, _ := act.Event.ToolInput["command"].(string)
 	h.Write([]byte(cmd))
 	return h.Sum64()
+}
+
+// --- Source file derivation helpers ---
+
+// deriveSourceFiles extracts file paths from matched activities and converts
+// test file paths to their corresponding source file paths using language
+// naming conventions (e.g., calc_test.go → calc.go).
+func deriveSourceFiles(activities []types.Activity) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, act := range activities {
+		fp, _ := act.Event.ToolInput["file_path"].(string)
+		if fp == "" {
+			continue
+		}
+		src := testToSourceFile(fp)
+		if src != "" && !seen[src] {
+			seen[src] = true
+			result = append(result, src)
+		}
+	}
+	return result
+}
+
+// testToSourceFile converts a test file path to its source counterpart
+// using language naming conventions. Returns "" if no convention matches.
+func testToSourceFile(path string) string {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	// Go: foo_test.go → foo.go
+	if strings.HasSuffix(base, "_test.go") {
+		return filepath.Join(dir, strings.TrimSuffix(base, "_test.go")+".go")
+	}
+
+	// JS/TS: foo.test.ts → foo.ts, foo.spec.tsx → foo.tsx
+	for _, mid := range []string{".test.", ".spec."} {
+		if idx := strings.LastIndex(base, mid); idx != -1 {
+			name := base[:idx]
+			ext := base[idx+len(mid)-1:] // includes the dot: ".ts", ".tsx"
+			return filepath.Join(dir, name+ext)
+		}
+	}
+
+	// Python: test_foo.py → foo.py
+	if strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py") {
+		return filepath.Join(dir, strings.TrimPrefix(base, "test_"))
+	}
+
+	// Python: foo_test.py → foo.py
+	if strings.HasSuffix(base, "_test.py") {
+		return filepath.Join(dir, strings.TrimSuffix(base, "_test.py")+".py")
+	}
+
+	return ""
+}
+
+// sourceFileFilter keeps only activities whose file path matches one of the
+// derived source files. For Read, matches on file_path. For Grep/Glob,
+// matches if the search path is the source file itself or its parent directory.
+func sourceFileFilter(activities []types.Activity, sourceFiles []string) []types.Activity {
+	var result []types.Activity
+	for _, act := range activities {
+		if matchesSourceFiles(sourceFiles, act) {
+			result = append(result, act)
+		}
+	}
+	return result
+}
+
+// matchesSourceFiles checks whether an activity targets any of the given
+// source file paths, either directly (file_path) or via search directory (path).
+func matchesSourceFiles(sourceFiles []string, act types.Activity) bool {
+	// Direct file path match (Read, Edit, Write).
+	if fp, ok := act.Event.ToolInput["file_path"].(string); ok && fp != "" {
+		for _, sf := range sourceFiles {
+			if fp == sf {
+				return true
+			}
+		}
+	}
+
+	// Search path match for Grep/Glob: matches if path is the source file
+	// itself or its immediate parent directory.
+	if p, ok := act.Event.ToolInput["path"].(string); ok && p != "" {
+		for _, sf := range sourceFiles {
+			if p == sf {
+				return true
+			}
+			if filepath.Dir(sf) == filepath.Clean(p) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // --- Diff filter helpers ---

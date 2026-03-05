@@ -65,7 +65,7 @@ squawk log --tail 20   # recent action log
 
 | Rule | Trigger | Action |
 |------|---------|--------|
-| `test-only-modification` | 3+ test edits, zero source reads (5 min) | block |
+| `test-only-modification` | 3+ test edits, zero reads of corresponding source (5 min) | block |
 | `excessive-retry-same-command` | Bash fails 3+ times (3 min) | block |
 | `blind-file-creation` | 3+ file creates, zero reads (5 min) | inject |
 | `same-file-excessive-edits` | 8+ edits (5 min) | inject |
@@ -137,6 +137,7 @@ rules:
 | `within` | duration | Time window: `"5m"`, `"30s"` |
 | `negate` | bool | Invert condition (true = absence check) |
 | `hash_mode` | string | `"content"`, `"edit"`, `"command"`, `"known_file"` |
+| `source_of` | int | Index of another condition; derives source file paths from that condition's matched test files (e.g., `calc_test.go` → `calc.go`) |
 | `diff_pattern` | regex | Pattern present in old_string but absent in new_string |
 | `diff_shrink_ratio` | float | 0-1: trigger when `len(new) < ratio * len(old)` |
 

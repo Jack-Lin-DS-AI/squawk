@@ -599,6 +599,7 @@ func TestEvaluateFilePatternExclude(t *testing.T) {
 // --- Scenario Tests: test-only-modification ---
 
 func newTestOnlyModificationRule() types.Rule {
+	sourceOfIdx := 0
 	r := types.Rule{
 		Name:     "test-only-modification",
 		Enabled:  true,
@@ -614,11 +615,12 @@ func newTestOnlyModificationRule() types.Rule {
 					Within:      "5m",
 				},
 				{
-					Event:  "PostToolUse",
-					Tool:   "Read|Glob|Grep",
-					Negate: true,
-					Count:  1,
-					Within: "5m",
+					Event:    "PostToolUse",
+					Tool:     "Read|Glob|Grep",
+					SourceOf: &sourceOfIdx,
+					Negate:   true,
+					Count:    1,
+					Within:   "5m",
 				},
 				{
 					Event:              "PostToolUse",
@@ -669,9 +671,7 @@ func TestScenarios_TestOnlyModification(t *testing.T) {
 		},
 		withReset("read source resets allowed", "Read", fileInput("/p/handler.go")),
 		withReset("edit source resets allowed", "Edit", fileInput("/p/handler.go")),
-		withReset("glob resets allowed", "Glob", nil),
-		withReset("grep resets allowed", "Grep", nil),
-		withReset("read test file counts as exploring allowed", "Read", fileInput("/p/handler_test.go")),
+		withReset("grep source dir resets allowed", "Grep", map[string]any{"pattern": "func", "path": "/p"}),
 		{
 			name: "bash does not reset still blocked",
 			activities: []types.Activity{
@@ -1579,4 +1579,169 @@ func TestScenarios_SessionContext(t *testing.T) {
 			wantMatch:  0,
 		},
 	})
+}
+
+// --- source_of Tests ---
+
+func TestTestToSourceFile(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Go
+		{"/p/calc_test.go", "/p/calc.go"},
+		{"/p/handler_test.go", "/p/handler.go"},
+		{"calc_test.go", "calc.go"},
+
+		// JS/TS .test.
+		{"/src/calc.test.ts", "/src/calc.ts"},
+		{"/src/App.test.tsx", "/src/App.tsx"},
+		{"/src/utils.test.js", "/src/utils.js"},
+
+		// JS/TS .spec.
+		{"/src/calc.spec.ts", "/src/calc.ts"},
+		{"/src/App.spec.tsx", "/src/App.tsx"},
+
+		// Python test_ prefix
+		{"/tests/test_calc.py", "/tests/calc.py"},
+
+		// Python _test suffix
+		{"/tests/calc_test.py", "/tests/calc.py"},
+
+		// No match
+		{"/p/calc.go", ""},
+		{"/p/README.md", ""},
+		{"/p/main.go", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := testToSourceFile(tt.input)
+			if got != tt.want {
+				t.Errorf("testToSourceFile(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSourceOf_ReadRelatedSource(t *testing.T) {
+	now := time.Now()
+	rule := newTestOnlyModificationRule()
+
+	runScenarios(t, rule, now, []scenario{
+		{
+			name: "read related source file allows",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Read", fileInput("/p/calc.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "read unrelated source file still blocked",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Read", fileInput("/p/utils.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+		{
+			name: "read test file itself still blocked",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Read", fileInput("/p/calc_test.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+		{
+			name: "glob without path still blocked",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Glob", nil, now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+		{
+			name: "grep in source directory allows",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Grep", map[string]any{"pattern": "func Add", "path": "/p"}, now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "grep in different directory still blocked",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Grep", map[string]any{"pattern": "func Add", "path": "/other"}, now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+		{
+			name: "multiple test files read one source allows",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/handler_test.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Read", fileInput("/p/calc.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/calc_test.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "JS test file read related source allows",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/src/App.test.ts"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/src/App.test.ts"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Read", fileInput("/src/App.ts"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/src/App.test.ts"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+	})
+}
+
+func TestSourceOf_ParserValidation(t *testing.T) {
+	// source_of referencing a future condition should fail validation.
+	dir := t.TempDir()
+	yaml := `rules:
+  - name: bad-source-of
+    enabled: true
+    trigger:
+      conditions:
+        - event: PostToolUse
+          tool: "Read"
+          source_of: 1
+          negate: true
+          count: 1
+          within: "5m"
+        - event: PostToolUse
+          tool: "Edit"
+          file_pattern: "*_test.go"
+          count: 3
+          within: "5m"
+    action:
+      type: block
+      message: "test"
+`
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadRules(dir)
+	if err == nil {
+		t.Fatal("expected error for source_of referencing non-previous condition")
+	}
+	if !strings.Contains(err.Error(), "source_of") {
+		t.Fatalf("error should mention source_of, got: %v", err)
+	}
 }

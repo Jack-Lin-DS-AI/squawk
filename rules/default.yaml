@@ -12,9 +12,10 @@ rules:
           file_pattern: "*_test.go|*.test.ts|*.test.js|*.spec.ts|*.spec.js"
           count: 3
           within: "5m"
-        # Condition 2: No Read/Glob/Grep of any file (no code exploration)
+        # Condition 2: No Read/Grep/Glob of the corresponding source files
         - event: PostToolUse
-          tool: "Read|Glob|Grep"
+          tool: "Read|Grep|Glob"
+          source_of: 0
           negate: true
           count: 1
           within: "5m"

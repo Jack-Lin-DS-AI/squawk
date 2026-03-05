@@ -84,6 +84,12 @@ func validateConditionFields(rule *types.Rule) error {
 		if cond.DiffShrinkRatio != 0 && (cond.DiffShrinkRatio < 0 || cond.DiffShrinkRatio > 1) {
 			return fmt.Errorf("condition %d: diff_shrink_ratio must be between 0 and 1, got %g", j, cond.DiffShrinkRatio)
 		}
+		if cond.SourceOf != nil {
+			ref := *cond.SourceOf
+			if ref < 0 || ref >= j {
+				return fmt.Errorf("condition %d: source_of must reference a previous condition index (0..%d), got %d", j, j-1, ref)
+			}
+		}
 	}
 	return nil
 }

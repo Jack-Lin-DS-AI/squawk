@@ -61,7 +61,7 @@ docs/                     — Research notes, rules catalog
 
 ## Conventions
 
-- Go 1.25, module: github.com/Jack-Lin-DS-AI/squawk
+- Go 1.24+, module: github.com/Jack-Lin-DS-AI/squawk
 - Dependencies: cobra, yaml.v3 (no others)
 - YAML for rule definitions
 - See global rules for Go style, testing, and error handling conventions

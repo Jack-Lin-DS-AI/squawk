@@ -1,11 +1,26 @@
 # Squawk
 
+[![CI](https://github.com/Jack-Lin-DS-AI/squawk/actions/workflows/ci.yml/badge.svg)](https://github.com/Jack-Lin-DS-AI/squawk/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.24+-blue)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Stateful behavioral pattern detection for AI coding agents.
 
 Squawk monitors [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 tool usage via hooks and detects behavioral anti-patterns that emerge across
 multiple actions over time — loops, oscillation, escalating bad habits — that
 no single-event hook can catch.
+
+## Why Squawk?
+
+AI coding agents can fall into repetitive loops: editing tests without reading
+source, retrying failing commands, oscillating between code states. These
+patterns waste tokens, time, and context window.
+
+Squawk detects these **cross-event behavioral anti-patterns** in real-time and
+intervenes — blocking destructive loops or injecting corrective context. Unlike
+single-event hooks, squawk tracks state over time to catch patterns that emerge
+across multiple tool calls.
 
 ## Quick Start
 
@@ -115,9 +130,12 @@ rules:
 
 ## Contributing
 
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
+conventions, and how to write custom rules.
+
 ```bash
 git clone https://github.com/Jack-Lin-DS-AI/squawk.git && cd squawk
-go build ./... && go test -race ./...
+make test
 ```
 
 ## License

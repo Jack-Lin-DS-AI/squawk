@@ -21,7 +21,7 @@ builds:
 archives:
   - format: tar.gz
     name_template: >-
-      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
 
 changelog:
   sort: asc
@@ -41,6 +41,7 @@ brews:
   - repository:
       owner: Jack-Lin-DS-AI
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/Jack-Lin-DS-AI/squawk
     description: Stateful behavioral pattern detection for AI coding agents
     license: MIT

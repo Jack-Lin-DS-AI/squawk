@@ -13,7 +13,7 @@ func TestAcquire_PIDFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	defer pf.Release()
+	defer func() { _ = pf.Release() }()
 
 	pidPath := filepath.Join(dir, pidFileName)
 	info, err := os.Stat(pidPath)

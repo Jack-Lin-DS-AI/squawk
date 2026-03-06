@@ -34,15 +34,13 @@ across multiple tool calls.
 brew install Jack-Lin-DS-AI/tap/squawk
 ```
 
-**Binary download** (example: macOS ARM):
+**Binary download** (example: macOS ARM — see [Releases](https://github.com/Jack-Lin-DS-AI/squawk/releases) for all platforms):
 
 ```bash
 curl -Lo squawk.tar.gz https://github.com/Jack-Lin-DS-AI/squawk/releases/latest/download/squawk_darwin_arm64.tar.gz
 tar xzf squawk.tar.gz
 sudo mv squawk /usr/local/bin/
 ```
-
-See [Releases](https://github.com/Jack-Lin-DS-AI/squawk/releases) for all platforms.
 
 **Go install**:
 

@@ -201,7 +201,9 @@ func (l *ActionLogger) write(entry LogEntry) {
 func (l *ActionLogger) rotateLocked() {
 	rotatedPath := l.logFile + ".1"
 	l.file.Close()
-	os.Rename(l.logFile, rotatedPath)
+	if err := os.Rename(l.logFile, rotatedPath); err != nil {
+		log.Printf("squawk: failed to rename log file during rotation: %v", err)
+	}
 	f, err := os.OpenFile(l.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		log.Printf("squawk: failed to rotate log file: %v", err)

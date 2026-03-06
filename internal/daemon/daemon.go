@@ -50,17 +50,17 @@ func Acquire(dir string) (*PIDFile, error) {
 	}
 
 	if err := f.Truncate(0); err != nil {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 		return nil, fmt.Errorf("failed to truncate PID file: %w", err)
 	}
 	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 		return nil, fmt.Errorf("failed to write PID: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 		return nil, fmt.Errorf("failed to sync PID file: %w", err)
 	}
@@ -131,7 +131,7 @@ func IsRunning(dir string) (bool, int, error) {
 		return true, pid, nil
 	}
 	// Lock succeeded — no daemon. Release immediately.
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return false, 0, nil
 }
 
@@ -178,7 +178,7 @@ func Daemonize(squawkDir string, args []string) (int, error) {
 
 	pid := cmd.Process.Pid
 	logFile.Close()
-	cmd.Process.Release()
+	_ = cmd.Process.Release()
 	return pid, nil
 }
 

@@ -15,7 +15,7 @@ func TestAcquire_NewPIDFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	defer pf.Release()
+	defer func() { _ = pf.Release() }()
 
 	pid, err := ReadPID(dir)
 	if err != nil {
@@ -33,7 +33,7 @@ func TestAcquire_AlreadyLocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Acquire() error: %v", err)
 	}
-	defer pf1.Release()
+	defer func() { _ = pf1.Release() }()
 
 	_, err = Acquire(dir)
 	if err == nil {
@@ -48,7 +48,7 @@ func TestAcquire_CreatesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	defer pf.Release()
+	defer func() { _ = pf.Release() }()
 
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -81,7 +81,7 @@ func TestRelease_CleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() after Release() error: %v", err)
 	}
-	defer pf2.Release()
+	defer func() { _ = pf2.Release() }()
 }
 
 func TestRelease_Idempotent(t *testing.T) {
@@ -117,7 +117,9 @@ func TestReadPID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			os.WriteFile(filepath.Join(dir, pidFileName), []byte(tt.content), 0o644)
+			if err := os.WriteFile(filepath.Join(dir, pidFileName), []byte(tt.content), 0o644); err != nil {
+				t.Fatalf("failed to write test PID file: %v", err)
+			}
 
 			pid, err := ReadPID(dir)
 			if tt.wantErr && err == nil {
@@ -163,7 +165,7 @@ func TestIsRunning_LockedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	defer pf.Release()
+	defer func() { _ = pf.Release() }()
 
 	running, pid, err := IsRunning(dir)
 	if err != nil {
@@ -181,7 +183,9 @@ func TestIsRunning_UnlockedFile(t *testing.T) {
 	dir := t.TempDir()
 
 	// Stale PID file without lock.
-	os.WriteFile(filepath.Join(dir, pidFileName), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, pidFileName), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("failed to write test PID file: %v", err)
+	}
 
 	running, _, err := IsRunning(dir)
 	if err != nil {

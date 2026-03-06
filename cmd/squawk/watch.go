@@ -54,7 +54,7 @@ func newWatchCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("failed to acquire PID file: %w", err)
 				}
-				defer pidFile.Release()
+				defer func() { _ = pidFile.Release() }()
 			}
 
 			// Load rules from the configured directory.

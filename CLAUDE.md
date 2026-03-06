@@ -36,7 +36,7 @@ Monitoring:
 ## Architecture
 
 ```
-cmd/squawk/main.go       — CLI entrypoint (cobra)
+cmd/squawk/              — CLI entrypoint (cobra): main.go, watch.go, setup.go, rules.go, status.go, helpers.go
 internal/types/           — Shared types (Event, Rule, Action, Condition)
 internal/rules/           — Rule engine: parsing YAML, evaluating conditions, mutations
 internal/monitor/         — HTTP hook server + activity tracker + admin API
@@ -45,7 +45,7 @@ internal/stats/           — Metrics aggregation + reporting (squawk stats)
 internal/config/          — Config management + settings.json hooks install/uninstall
 internal/daemon/          — PID file management + process daemonization
 rules/                    — Default rule YAML files
-docs/                     — Research notes, rules catalog
+docs/                     — Rules catalog
 ```
 
 ## How It Works

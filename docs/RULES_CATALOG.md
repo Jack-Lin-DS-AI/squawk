@@ -202,7 +202,7 @@ Reading unrelated files does NOT reset the counter.
 
 | Rule | Technique | Severity | Action |
 |------|-----------|----------|--------|
-| test-only-modification | CNT+ABS | CRITICAL | block |
+| test-only-modification | CNT+ABS+SRC | CRITICAL | block |
 | edit-oscillation | CHASH | CRITICAL | block |
 | test-assertion-weakening | DIFF+CNT | CRITICAL | block |
 | excessive-retry-same-command | CNT | HIGH | block |

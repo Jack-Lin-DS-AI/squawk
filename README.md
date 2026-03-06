@@ -28,6 +28,8 @@ across multiple tool calls.
 
 ## Install
 
+Pick one:
+
 **Homebrew** (macOS/Linux):
 
 ```bash

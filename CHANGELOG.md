@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **13 built-in behavioral detection rules** across 3 categories (counter-based, hash-based, diff-based) to detect anti-patterns like test-only edits, excessive retries, edit oscillation, and error handling removal
+- **12 built-in behavioral detection rules** across 3 categories (counter-based, hash-based, diff-based) to detect anti-patterns like test-only edits, excessive retries, edit oscillation, and error handling removal
 - **Cross-condition `source_of`** — derive source file paths from test files using naming conventions (e.g., `calc_test.go` → `calc.go`) for precise related-file detection
+- **Per-file `group_by`** — count activities per file_path independently (used by `same-file-excessive-edits` to track per-file edit counts)
 - **Rule management CLI** — list, enable, disable, remove, and interactively create custom rules
 - **Rule testing framework** — `squawk rules test` with scenario simulations (test-modification, excessive-retry, blind-creation)
 - **Cooldown mechanism** to prevent repetitive rule interventions for the same pattern

@@ -917,68 +917,6 @@ func TestEvaluateNoActivities(t *testing.T) {
 // Default Rule Scenario Tests
 // =============================================================================
 
-func TestScenarios_ExcessiveRetry(t *testing.T) {
-	rule := findRule(t, loadTestRules(t), "excessive-retry-same-command")
-	now := time.Now()
-	runScenarios(t, rule, now, []scenario{
-		{
-			name: "3 bash failures blocked",
-			activities: []types.Activity{
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-2*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-1*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-30*time.Second), "s1"),
-			},
-			wantMatch:  1,
-			wantAction: types.ActionBlock,
-		},
-		{
-			name: "2 failures allowed",
-			activities: []types.Activity{
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-2*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-1*time.Minute), "s1"),
-			},
-			wantMatch: 0,
-		},
-		{
-			name: "outside 3m window allowed",
-			activities: []types.Activity{
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-5*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-4*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-3*time.Minute-1*time.Second), "s1"),
-			},
-			wantMatch: 0,
-		},
-		{
-			name: "non-bash failures allowed",
-			activities: []types.Activity{
-				makeActivity("PostToolUseFailure", "Edit", nil, now.Add(-2*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Edit", nil, now.Add(-1*time.Minute), "s1"),
-				makeActivity("PostToolUseFailure", "Edit", nil, now.Add(-30*time.Second), "s1"),
-			},
-			wantMatch: 0,
-		},
-		{
-			name: "success events not counted allowed",
-			activities: []types.Activity{
-				makeActivity("PostToolUse", "Bash", nil, now.Add(-2*time.Minute), "s1"),
-				makeActivity("PostToolUse", "Bash", nil, now.Add(-1*time.Minute), "s1"),
-				makeActivity("PostToolUse", "Bash", nil, now.Add(-30*time.Second), "s1"),
-			},
-			wantMatch: 0,
-		},
-		{
-			name: "4 failures blocked",
-			activities: []types.Activity{
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-150*time.Second), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-100*time.Second), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-50*time.Second), "s1"),
-				makeActivity("PostToolUseFailure", "Bash", nil, now.Add(-10*time.Second), "s1"),
-			},
-			wantMatch: 1,
-		},
-	})
-}
-
 func TestScenarios_BlindFileCreation(t *testing.T) {
 	rule := findRule(t, loadTestRules(t), "blind-file-creation")
 	now := time.Now()
@@ -1054,7 +992,7 @@ func TestScenarios_ExcessiveEdits(t *testing.T) {
 			wantMatch:  0,
 		},
 		{
-			name: "mixed edit write triggered",
+			name: "spread across files allowed",
 			activities: []types.Activity{
 				makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-4*time.Minute), "s1"),
 				makeActivity("PostToolUse", "Write", fileInput("/p/new.go"), now.Add(-210*time.Second), "s1"),
@@ -1065,7 +1003,17 @@ func TestScenarios_ExcessiveEdits(t *testing.T) {
 				makeActivity("PostToolUse", "Write", fileInput("/p/config.go"), now.Add(-1*time.Minute), "s1"),
 				makeActivity("PostToolUse", "Edit", fileInput("/p/handler.go"), now.Add(-30*time.Second), "s1"),
 			},
-			wantMatch: 1,
+			wantMatch: 0, // 5 edits on handler.go, 1 each on 3 others — no single file reaches 8
+		},
+		{
+			name: "8 same file with other files triggered",
+			activities: append(
+				nActivities(8, "PostToolUse", "Edit", fileInput("/p/handler.go"), 30*time.Second, now),
+				makeActivity("PostToolUse", "Write", fileInput("/p/other.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Write", fileInput("/p/config.go"), now.Add(-1*time.Minute), "s1"),
+			),
+			wantMatch:  1,
+			wantAction: types.ActionInject,
 		},
 		{
 			name:       "10 edits triggered",
@@ -1743,5 +1691,110 @@ func TestSourceOf_ParserValidation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "source_of") {
 		t.Fatalf("error should mention source_of, got: %v", err)
+	}
+}
+
+func TestGroupByFile(t *testing.T) {
+	now := time.Now()
+	rule := types.Rule{
+		Name:    "per-file-count",
+		Enabled: true,
+		Trigger: types.Trigger{
+			Logic: "and",
+			Conditions: []types.Condition{
+				{Event: "PostToolUse", Tool: "Edit|Write", Count: 3, Within: "5m", GroupBy: "file"},
+			},
+		},
+		Action: types.Action{Type: types.ActionInject, Message: "too many edits"},
+	}
+	compileTestRule(&rule)
+
+	tests := []struct {
+		name       string
+		activities []types.Activity
+		wantMatch  int
+	}{
+		{
+			name: "3 edits same file triggers",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+		{
+			name: "3 edits different files no trigger",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/b.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/c.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+		{
+			name: "one file reaches threshold among many",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-4*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/b.go"), now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/b.go"), now.Add(-90*time.Second), "s1"),
+				makeActivity("PostToolUse", "Edit", fileInput("/p/a.go"), now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 1,
+		},
+		{
+			name:       "no activities no trigger",
+			activities: nil,
+			wantMatch:  0,
+		},
+		{
+			name: "activities without file_path ignored",
+			activities: []types.Activity{
+				makeActivity("PostToolUse", "Edit", map[string]any{}, now.Add(-3*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", map[string]any{}, now.Add(-2*time.Minute), "s1"),
+				makeActivity("PostToolUse", "Edit", map[string]any{}, now.Add(-1*time.Minute), "s1"),
+			},
+			wantMatch: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := NewEngine([]types.Rule{rule})
+			event := types.Event{HookEventName: "PostToolUse", ToolName: "Edit", Timestamp: now}
+			matches := engine.Evaluate(tt.activities, event)
+			if len(matches) != tt.wantMatch {
+				t.Errorf("got %d matches, want %d", len(matches), tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestGroupBy_ParserValidation(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `rules:
+  - name: bad-group-by
+    enabled: true
+    trigger:
+      conditions:
+        - event: PostToolUse
+          tool: "Edit"
+          count: 3
+          within: "5m"
+          group_by: "session"
+    action:
+      type: inject
+      message: "test"
+`
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadRules(dir)
+	if err == nil {
+		t.Fatal("expected error for invalid group_by value")
+	}
+	if !strings.Contains(err.Error(), "group_by") {
+		t.Fatalf("error should mention group_by, got: %v", err)
 	}
 }

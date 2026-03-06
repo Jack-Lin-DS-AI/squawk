@@ -36,24 +36,6 @@ rules:
         Please read the implementation file first to understand why the test is failing.
         The issue may be in the source code, not the test.
 
-  - name: excessive-retry-same-command
-    description: "Detect running the same failing command repeatedly"
-    enabled: true
-    priority: 8
-    trigger:
-      logic: and
-      conditions:
-        - event: PostToolUseFailure
-          tool: "Bash"
-          count: 3
-          within: "3m"
-    action:
-      type: block
-      cooldown: "60s"
-      message: |
-        The same command has failed {count} times. Stop retrying and investigate the root cause.
-        Consider reading error messages carefully or trying a different approach.
-
   - name: blind-file-creation
     description: "Detect creating new files without reading existing ones first"
     enabled: true
@@ -87,10 +69,11 @@ rules:
           tool: "Edit|Write"
           count: 8
           within: "5m"
+          group_by: file
     action:
       type: inject
       message: |
-        You have made {count} file edits in the last 5 minutes. This suggests you may be struggling.
+        You have made {count} edits to the same file in the last 5 minutes. This suggests you may be struggling.
         Consider reading related files for context, running tests for feedback, or stepping back to reconsider your approach.
 
   - name: write-before-read

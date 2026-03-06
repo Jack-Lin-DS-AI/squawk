@@ -182,49 +182,6 @@ func TestRuleTriggers_E2E(t *testing.T) {
 		}
 	})
 
-	t.Run("excessive-retry-same-command", func(t *testing.T) {
-		ts := testServer(t, allRules, "excessive-retry-same-command")
-		now := time.Now()
-		sid := "sess-excessive-retry"
-
-		// Send 3 PostToolUseFailure Bash events.
-		for i := range 3 {
-			postToolUse(t, ts, makeEvent(sid, "PostToolUseFailure", "Bash",
-				now.Add(time.Duration(i)*time.Second),
-				map[string]any{"command": "go build ./..."}))
-		}
-
-		// PreToolUse Bash — should be blocked (after 60s cooldown).
-		hr := preToolUse(t, ts, makeEvent(sid, "PreToolUse", "Bash",
-			now.Add(63*time.Second),
-			map[string]any{"command": "go build ./..."}))
-
-		if hr.Decision != "block" {
-			t.Errorf("expected block, got decision=%q reason=%q", hr.Decision, hr.Reason)
-		}
-	})
-
-	t.Run("excessive-retry-same-command_allows_below_threshold", func(t *testing.T) {
-		ts := testServer(t, allRules, "excessive-retry-same-command")
-		now := time.Now()
-		sid := "sess-excessive-retry-neg"
-
-		// Only 2 failures — below threshold of 3.
-		for i := range 2 {
-			postToolUse(t, ts, makeEvent(sid, "PostToolUseFailure", "Bash",
-				now.Add(time.Duration(i)*time.Second),
-				map[string]any{"command": "go build ./..."}))
-		}
-
-		hr := preToolUse(t, ts, makeEvent(sid, "PreToolUse", "Bash",
-			now.Add(3*time.Second),
-			map[string]any{"command": "go build ./..."}))
-
-		if hr.Decision == "block" {
-			t.Errorf("expected allow (only 2 failures), got block: %q", hr.Reason)
-		}
-	})
-
 	t.Run("blind-file-creation", func(t *testing.T) {
 		ts := testServer(t, allRules, "blind-file-creation")
 		now := time.Now()

@@ -67,16 +67,15 @@ squawk stats           # intervention metrics
 squawk log --tail 20   # recent action log
 ```
 
-## Built-in Rules (13)
+## Built-in Rules (12)
 
 **Counter-based** — count events within a time window:
 
 | Rule | Trigger | Action |
 |------|---------|--------|
 | `test-only-modification` | 3+ test edits, zero reads of corresponding source (5 min) | block |
-| `excessive-retry-same-command` | Bash fails 3+ times (3 min) | block |
 | `blind-file-creation` | 3+ file creates, zero reads (5 min) | inject |
-| `same-file-excessive-edits` | 8+ edits (5 min) | inject |
+| `same-file-excessive-edits` | 8+ edits to the same file (5 min) | inject |
 | `write-before-read` | 3+ writes, zero reads (2 min) | inject |
 | `session-context-warning` | 50+ tool calls (30 min) | inject |
 
@@ -146,6 +145,7 @@ rules:
 | `negate` | bool | Invert condition (true = absence check) |
 | `hash_mode` | string | `"content"`, `"edit"`, `"command"`, `"known_file"` |
 | `source_of` | int | Index of another condition; derives source file paths from that condition's matched test files (e.g., `calc_test.go` → `calc.go`) |
+| `group_by` | string | `"file"`: count per file_path, trigger when any single file meets the count threshold |
 | `diff_pattern` | regex | Pattern present in old_string but absent in new_string |
 | `diff_shrink_ratio` | float | 0-1: trigger when `len(new) < ratio * len(old)` |
 

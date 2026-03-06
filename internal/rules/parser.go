@@ -90,6 +90,9 @@ func validateConditionFields(rule *types.Rule) error {
 				return fmt.Errorf("condition %d: source_of must reference a previous condition index (0..%d), got %d", j, j-1, ref)
 			}
 		}
+		if cond.GroupBy != "" && cond.GroupBy != "file" {
+			return fmt.Errorf("condition %d: invalid group_by %q (supported: \"file\")", j, cond.GroupBy)
+		}
 	}
 	return nil
 }

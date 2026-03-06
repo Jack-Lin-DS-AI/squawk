@@ -181,6 +181,11 @@ func evaluateCondition(cond types.Condition, activities, allActivities []types.A
 		return nil, false
 	}
 
+	// group_by: file — count per file_path, trigger when any single file meets the threshold.
+	if cond.GroupBy == "file" {
+		return groupByFileCheck(matched, requiredCount)
+	}
+
 	// Positive: the condition passes when at least requiredCount matches are found.
 	if len(matched) >= requiredCount {
 		return matched, true
@@ -501,6 +506,28 @@ func matchesSourceFiles(sourceFiles []string, act types.Activity) bool {
 	}
 
 	return false
+}
+
+// --- Group-by helpers ---
+
+// groupByFileCheck groups activities by file_path and returns the group that
+// meets the count threshold. Returns only the activities from the first
+// qualifying file, keeping the match focused.
+func groupByFileCheck(activities []types.Activity, requiredCount int) ([]types.Activity, bool) {
+	groups := make(map[string][]types.Activity)
+	for _, act := range activities {
+		fp, _ := act.Event.ToolInput["file_path"].(string)
+		if fp == "" {
+			continue
+		}
+		groups[fp] = append(groups[fp], act)
+	}
+	for _, group := range groups {
+		if len(group) >= requiredCount {
+			return group, true
+		}
+	}
+	return nil, false
 }
 
 // --- Diff filter helpers ---

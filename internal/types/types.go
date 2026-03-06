@@ -46,6 +46,7 @@ type Condition struct {
 	DiffPattern        string  `yaml:"diff_pattern" json:"diff_pattern"`                  // Regex: present in old_string, absent in new_string → "removal"
 	DiffShrinkRatio    float64 `yaml:"diff_shrink_ratio" json:"diff_shrink_ratio"`        // 0-1: trigger when len(new) < ratio * len(old)
 	SourceOf           *int    `yaml:"source_of" json:"source_of"`                        // Index of another condition; derive source file paths from that condition's matched test files
+	GroupBy            string  `yaml:"group_by" json:"group_by"`                          // "file": count per file_path, trigger when any single file meets the count threshold
 	ToolRe             *regexp.Regexp `yaml:"-" json:"-"` // compiled from Tool
 	DiffPatternRe      *regexp.Regexp `yaml:"-" json:"-"` // compiled from DiffPattern
 }

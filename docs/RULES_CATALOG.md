@@ -50,18 +50,6 @@ Reading unrelated files does NOT reset the counter.
 
 ---
 
-### `excessive-retry-same-command` — Same Failing Command Retried
-
-| Field | Value |
-|-------|-------|
-| **Technique** | CNT |
-| **Severity** | HIGH |
-| **Action** | block (60s cooldown) |
-
-**Trigger:** Bash tool fails (PostToolUseFailure) 3+ times within 3 minutes.
-
----
-
 ### `blind-file-creation` — Creating Without Exploring
 
 | Field | Value |
@@ -80,11 +68,11 @@ Reading unrelated files does NOT reset the counter.
 
 | Field | Value |
 |-------|-------|
-| **Technique** | CNT |
+| **Technique** | CNT (per-file) |
 | **Severity** | MEDIUM |
 | **Action** | inject |
 
-**Trigger:** Edit/Write tool used 8+ times within 5 minutes.
+**Trigger:** Edit/Write tool used 8+ times on the **same file** within 5 minutes. Uses `group_by: file` to count per file_path independently.
 
 ---
 
@@ -146,7 +134,7 @@ Reading unrelated files does NOT reset the counter.
 | **Severity** | HIGH |
 | **Action** | block (60s cooldown) |
 
-**Trigger:** The exact same Bash command fails (PostToolUseFailure) 3+ times within 3 minutes. Upgrade of `excessive-retry-same-command` with command hash matching.
+**Trigger:** The exact same Bash command fails (PostToolUseFailure) 3+ times within 3 minutes. Uses FNV-1a command hashing for exact match.
 
 ---
 
@@ -205,7 +193,6 @@ Reading unrelated files does NOT reset the counter.
 | test-only-modification | CNT+ABS+SRC | CRITICAL | block |
 | edit-oscillation | CHASH | CRITICAL | block |
 | test-assertion-weakening | DIFF+CNT | CRITICAL | block |
-| excessive-retry-same-command | CNT | HIGH | block |
 | repeated-identical-edit | EHASH | HIGH | block |
 | repeated-failing-command | CMDHASH | HIGH | block |
 | error-handling-removal | DIFF+CNT | HIGH | block |

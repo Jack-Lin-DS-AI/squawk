@@ -84,7 +84,7 @@ squawk log --tail 20   # recent action log
 |------|---------|--------|
 | `edit-oscillation` | File content reverts to previous state (10 min) | block |
 | `repeated-identical-edit` | Same (file, old, new) edit 3+ times (5 min) | block |
-| `repeated-failing-command` | Exact same command fails 3+ times (3 min) | block |
+| `repeated-failing-command` | Same base command fails 3+ times with any args (3 min) | block |
 | `whole-file-rewrite` | Write on already-read/edited files 2+ times (5 min) | inject |
 
 **Diff-based** — regex/ratio analysis on edit content:
@@ -165,6 +165,10 @@ conventions, and how to write custom rules.
 git clone https://github.com/Jack-Lin-DS-AI/squawk.git && cd squawk
 make test
 ```
+
+## Support
+
+If you find Squawk useful, please consider giving it a ⭐ on GitHub — it helps others discover the project!
 
 ## License
 
